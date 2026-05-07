@@ -58,6 +58,7 @@ Mask selection:
 Hex visualization:
   Space                 toggle averaged-color hexagon view
   Enter                 run dry-to-wet OKLab hex analysis (0=red, 100=green)
+                        Hexes too far from dry-wet colour line show checkers
   1 / 2 / 3 / 4         show hexagons only for the selected mask layer
 
 Editing:
@@ -103,6 +104,7 @@ class EditorState:
     fps: float
     scale: float
     alpha: float
+    analysis_max_distance: float
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"
@@ -164,6 +166,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.45,
         help="Overlay opacity for existing masks, from 0.0 to 1.0.",
+    )
+    parser.add_argument(
+        "--analysis-max-distance",
+        type=float,
+        default=0.08,
+        help=(
+            "Maximum OKLab perpendicular distance from a dry-to-wet colour line "
+            "before a hex is treated as an unrelated colour change."
+        ),
     )
     parser.add_argument(
         "--brush-size",
@@ -642,14 +653,23 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
         print("Wetness analysis found no hex cells with both dry and wet examples.")
 
 
-def estimate_wetness_value(model: HexWetnessModel, bgr_color: np.ndarray) -> float:
+def project_onto_wetness_axis(model: HexWetnessModel, bgr_color: np.ndarray) -> tuple[float, float]:
     current_oklab = bgr_to_oklab(bgr_color)
     axis = model.wet_oklab - model.dry_oklab
     denominator = float(np.dot(axis, axis))
     if denominator <= 1e-12:
-        return 0.0
-    position = float(np.dot(current_oklab - model.dry_oklab, axis) / denominator)
-    return min(max(position, 0.0), 1.0) * 100.0
+        return 0.0, float("inf")
+
+    raw_position = float(np.dot(current_oklab - model.dry_oklab, axis) / denominator)
+    projected_oklab = model.dry_oklab + raw_position * axis
+    distance = float(np.linalg.norm(current_oklab - projected_oklab))
+    wetness = min(max(raw_position, 0.0), 1.0) * 100.0
+    return wetness, distance
+
+
+def estimate_wetness_value(model: HexWetnessModel, bgr_color: np.ndarray) -> float:
+    wetness, _distance = project_onto_wetness_axis(model, bgr_color)
+    return wetness
 
 
 def analysis_visibility_mask(state: EditorState) -> np.ndarray:
@@ -712,7 +732,13 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
                 cv2.fillPoly(hex_mask, [display_polygon], 255)
                 cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
                 continue
-            wetness_value = estimate_wetness_value(state.wetness_models[cell_index], average_color)
+            wetness_value, distance = project_onto_wetness_axis(state.wetness_models[cell_index], average_color)
+            if distance > state.analysis_max_distance:
+                square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
+                fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
+                cv2.fillPoly(hex_mask, [display_polygon], 255)
+                cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
+                continue
             color = wetness_to_bgr(wetness_value)
             if state.hex_cell_size * state.scale >= 18:
                 wetness_text = f"{wetness_value:.0f}"
@@ -878,6 +904,8 @@ def main() -> int:
         raise ValueError("--alpha must be between 0.0 and 1.0.")
     if args.brush_size <= 0:
         raise ValueError("--brush-size must be greater than 0.")
+    if args.analysis_max_distance < 0:
+        raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.max_display_width < 0:
         raise ValueError("--max-display-width must be 0 or greater.")
 
@@ -903,6 +931,7 @@ def main() -> int:
         fps=fps,
         scale=args.scale,
         alpha=args.alpha,
+        analysis_max_distance=args.analysis_max_distance,
         brush_size=args.brush_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
     )
