@@ -182,6 +182,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--hex-size",
+        type=int,
+        default=40,
+        help="Hex cell radius in original video pixels for analysis and batch video processing.",
+    )
+    parser.add_argument(
+        "--process-video",
+        action="store_true",
+        help="Process the entire video with the analysis hex overlay using masks loaded from --load-dir.",
+    )
+    parser.add_argument(
+        "--output-video",
+        type=Path,
+        help="Output video path for --process-video. Defaults to <out-dir>/<video>_hex_overlay.mp4.",
+    )
+    parser.add_argument(
         "--brush-size",
         type=int,
         default=20,
@@ -823,6 +839,74 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     return hex_overlay
 
 
+def make_analysis_video_frame(state: EditorState, frame: np.ndarray) -> np.ndarray:
+    view = FrameView(frame=frame, display_frame=frame.copy())
+    hex_overlay = make_hex_overlay(state, view)
+    output_frame = frame.copy()
+    if view.hex_mask is not None:
+        hex_pixels = view.hex_mask > 0
+        blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
+        output_frame[hex_pixels] = blended_hex[hex_pixels]
+    return output_frame
+
+
+def default_output_video_path(state: EditorState) -> Path:
+    return state.out_dir / f"{state.video_path.stem}_hex_overlay.mp4"
+
+
+def process_video_with_analysis_overlay(
+    state: EditorState,
+    capture: cv2.VideoCapture,
+    output_path: Path | None,
+) -> int:
+    if not state.condition_masks_by_frame:
+        raise RuntimeError("No mask annotations are loaded; pass --load-dir with saved mask PNGs.")
+
+    state.scale = 1.0
+    state.hex_enabled = True
+    state.analysis_enabled = False
+    run_wetness_analysis(state, capture)
+    if not state.analysis_enabled:
+        raise RuntimeError("Cannot process video because wetness analysis found no dry/wet hex models.")
+
+    output_path = output_path or default_output_video_path(state)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fps = state.fps if state.fps > 0 else 30.0
+    writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (state.width, state.height))
+    if not writer.isOpened():
+        raise RuntimeError(f"Could not open output video for writing: {output_path}")
+
+    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    processed_frames = 0
+    total_frames = max(state.frame_count, 0)
+    empty_condition_masks = make_empty_condition_masks(state)
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+
+            state.frame_index = processed_frames
+            frame_masks = state.condition_masks_by_frame.get(processed_frames, empty_condition_masks)
+            state.current_condition_frame = processed_frames
+            for label in CONDITION_LABELS:
+                state.masks[label] = frame_masks[label]
+            output_frame = make_analysis_video_frame(state, frame)
+            writer.write(output_frame)
+            processed_frames += 1
+
+            if processed_frames % 100 == 0:
+                if total_frames:
+                    print(f"Processed {processed_frames}/{total_frames} frames...")
+                else:
+                    print(f"Processed {processed_frames} frames...")
+    finally:
+        writer.release()
+
+    print(f"Wrote analysis hex overlay video with {processed_frames} frame(s) to: {output_path.resolve()}")
+    return 0
+
+
 def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     if view.overlay is not None and not state.render_dirty:
         return view.overlay
@@ -961,6 +1045,10 @@ def main() -> int:
         raise ValueError("--alpha must be between 0.0 and 1.0.")
     if args.brush_size <= 0:
         raise ValueError("--brush-size must be greater than 0.")
+    if args.hex_size <= 0:
+        raise ValueError("--hex-size must be greater than 0.")
+    if args.process_video and not args.load_dir:
+        raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.max_display_width < 0:
@@ -975,7 +1063,9 @@ def main() -> int:
     frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = float(capture.get(cv2.CAP_PROP_FPS))
 
-    if args.max_display_width and width > args.max_display_width:
+    if args.process_video:
+        args.scale = 1.0
+    elif args.max_display_width and width > args.max_display_width:
         args.scale = min(args.scale, args.max_display_width / width)
         print(f"Display scale set to {args.scale:.3f} for smoother editing.")
 
@@ -990,6 +1080,7 @@ def main() -> int:
         alpha=args.alpha,
         analysis_max_distance=args.analysis_max_distance,
         brush_size=args.brush_size,
+        hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
     )
     state.condition_masks_by_frame[state.frame_index] = {
@@ -999,6 +1090,12 @@ def main() -> int:
     state.display_masks = {label: make_display_mask(mask, state) for label, mask in state.masks.items()}
     if args.load_dir:
         load_outputs(state, args.load_dir)
+
+    if args.process_video:
+        try:
+            return process_video_with_analysis_overlay(state, capture, args.output_video)
+        finally:
+            capture.release()
 
     print(HELP_TEXT)
     window_name = "wet/dry floor brush mask mapper"

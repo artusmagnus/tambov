@@ -51,6 +51,20 @@ Disable automatic display downscaling if you need a full-resolution window:
 python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_output
 ```
 
+### Process an entire video
+
+After saving masks, run batch processing to reconstruct the annotations from a mask folder, build the same OKLab dry-to-wet hex analysis used by the interactive Enter key, and write a full video with the analysis hex overlay applied to every frame:
+
+```bash
+python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --output-video wetness_overlay.mp4
+```
+
+If `--output-video` is omitted, the processed video is written to `<out-dir>/<video>_hex_overlay.mp4`. Use `--hex-size` to change the hex cell radius in original video pixels; if it is omitted, the default hex size is `40` pixels:
+
+```bash
+python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --hex-size 30
+```
+
 ### Controls
 
 | Action | Control |
