@@ -35,6 +35,7 @@ Wet/dry floor brush mask mapper controls
 ----------------------------------------
 Mouse:
   Left mouse drag       paint or erase on the selected mask
+                        Dry/wet painting is limited to the floor mask
 
 Brush mode:
   d                     draw/paint mode
@@ -88,7 +89,7 @@ class EditorState:
     masks: dict[str, np.ndarray] = field(default_factory=dict)
     display_masks: dict[str, np.ndarray] = field(default_factory=dict)
     masks_dirty: bool = True
-    history: list[tuple[str, np.ndarray]] = field(default_factory=list)
+    history: list[list[tuple[str, np.ndarray]]] = field(default_factory=list)
     dirty: bool = False
 
     @property
@@ -197,37 +198,73 @@ def display_point(point: tuple[int, int], scale: float) -> tuple[int, int]:
     return int(round(point[0] * scale)), int(round(point[1] * scale))
 
 
-def push_history(state: EditorState, label: str) -> None:
-    state.history.append((label, state.masks[label].copy()))
+def push_history(state: EditorState, labels: str | list[str] | tuple[str, ...]) -> None:
+    if isinstance(labels, str):
+        labels = [labels]
+    snapshot = [(label, state.masks[label].copy()) for label in dict.fromkeys(labels)]
+    state.history.append(snapshot)
     if len(state.history) > 100:
         state.history.pop(0)
 
 
+def opposite_floor_condition(label: str) -> str:
+    return "wet" if label == "dry" else "dry"
+
+
+def draw_stroke(stroke_mask: np.ndarray, start: tuple[int, int] | None, end: tuple[int, int], radius: int) -> None:
+    if start is None:
+        cv2.circle(stroke_mask, end, radius, 255, -1)
+    else:
+        cv2.line(stroke_mask, start, end, 255, max(1, radius * 2), cv2.LINE_8)
+
+
+def apply_dry_wet_floor_rules(state: EditorState, stroke_mask: np.ndarray, display_stroke_mask: np.ndarray) -> list[str]:
+    selected = state.selected
+    changed_labels = [selected]
+
+    if selected == "floor":
+        if state.brush_mode == "draw":
+            state.masks["floor"][stroke_mask > 0] = 255
+            state.display_masks["floor"][display_stroke_mask > 0] = 255
+        else:
+            state.masks["floor"][stroke_mask > 0] = 0
+            state.display_masks["floor"][display_stroke_mask > 0] = 0
+            for label in ("dry", "wet"):
+                state.masks[label][state.masks["floor"] == 0] = 0
+                state.display_masks[label][state.display_masks["floor"] == 0] = 0
+                changed_labels.append(label)
+        return changed_labels
+
+    if state.brush_mode == "erase":
+        state.masks[selected][stroke_mask > 0] = 0
+        state.display_masks[selected][display_stroke_mask > 0] = 0
+        return changed_labels
+
+    opposite = opposite_floor_condition(selected)
+    allowed_pixels = (stroke_mask > 0) & (state.masks["floor"] > 0)
+    display_allowed_pixels = (display_stroke_mask > 0) & (state.display_masks["floor"] > 0)
+    state.masks[selected][allowed_pixels] = 255
+    state.display_masks[selected][display_allowed_pixels] = 255
+    state.masks[opposite][allowed_pixels] = 0
+    state.display_masks[opposite][display_allowed_pixels] = 0
+    changed_labels.append(opposite)
+    return changed_labels
+
+
 def paint_at(state: EditorState, point: tuple[int, int]) -> None:
-    value = 255 if state.brush_mode == "draw" else 0
+    stroke_mask = np.zeros((state.height, state.width), dtype=np.uint8)
+    display_stroke_mask = np.zeros(state.display_size[::-1], dtype=np.uint8)
     display_current = display_point(point, state.scale)
     display_radius = max(1, int(round(state.brush_size * state.scale)))
 
-    if state.last_paint_point is None:
-        cv2.circle(state.masks[state.selected], point, state.brush_size, value, -1)
-        cv2.circle(state.display_masks[state.selected], display_current, display_radius, value, -1)
-    else:
-        cv2.line(
-            state.masks[state.selected],
-            state.last_paint_point,
-            point,
-            value,
-            max(1, state.brush_size * 2),
-            cv2.LINE_8,
-        )
-        cv2.line(
-            state.display_masks[state.selected],
-            display_point(state.last_paint_point, state.scale),
-            display_current,
-            value,
-            max(1, display_radius * 2),
-            cv2.LINE_8,
-        )
+    draw_stroke(stroke_mask, state.last_paint_point, point, state.brush_size)
+    draw_stroke(
+        display_stroke_mask,
+        display_point(state.last_paint_point, state.scale) if state.last_paint_point else None,
+        display_current,
+        display_radius,
+    )
+    apply_dry_wet_floor_rules(state, stroke_mask, display_stroke_mask)
     state.last_paint_point = point
     state.dirty = True
     state.masks_dirty = True
@@ -235,7 +272,12 @@ def paint_at(state: EditorState, point: tuple[int, int]) -> None:
 
 
 def begin_stroke(state: EditorState, point: tuple[int, int]) -> None:
-    push_history(state, state.selected)
+    labels = [state.selected]
+    if state.selected == "floor" and state.brush_mode == "erase":
+        labels.extend(["dry", "wet"])
+    elif state.selected in ("dry", "wet") and state.brush_mode == "draw":
+        labels.append(opposite_floor_condition(state.selected))
+    push_history(state, labels)
     state.is_painting = True
     state.cursor = point
     state.last_paint_point = None
@@ -248,9 +290,16 @@ def end_stroke(state: EditorState) -> None:
 
 
 def reset_selected_mask(state: EditorState) -> None:
-    push_history(state, state.selected)
+    labels = [state.selected]
+    if state.selected == "floor":
+        labels.extend(["dry", "wet"])
+    push_history(state, labels)
     state.masks[state.selected][:] = 0
     state.display_masks[state.selected][:] = 0
+    if state.selected == "floor":
+        for label in ("dry", "wet"):
+            state.masks[label][:] = 0
+            state.display_masks[label][:] = 0
     state.dirty = True
     state.masks_dirty = True
     state.render_dirty = True
@@ -261,18 +310,21 @@ def undo(state: EditorState) -> None:
     if not state.history:
         print("Nothing to undo.")
         return
-    label, previous = state.history.pop()
-    state.masks[label] = previous
-    refresh_display_mask(state, label)
+    snapshot = state.history.pop()
+    restored_labels = []
+    for label, previous in snapshot:
+        state.masks[label] = previous
+        refresh_display_mask(state, label)
+        restored_labels.append(label)
     state.dirty = True
     state.render_dirty = True
-    print(f"Undid last change to '{label}' mask.")
+    print(f"Undid last change to {', '.join(restored_labels)} mask(s).")
 
 
 def clip_to_floor(state: EditorState) -> None:
     floor = state.masks["floor"]
+    push_history(state, ["dry", "wet"])
     for label in ("dry", "wet"):
-        push_history(state, label)
         state.masks[label] = cv2.bitwise_and(state.masks[label], floor)
         refresh_display_mask(state, label)
     state.dirty = True
@@ -321,7 +373,10 @@ def save_outputs(state: EditorState) -> None:
         "classes": {label: {"id": data["id"]} for label, data in MASK_CLASSES.items()},
         "binary_masks": saved_masks,
         "combined_label_map": str(combined_path),
-        "notes": "In the combined label map, wet/dry labels overwrite floor where they overlap.",
+        "notes": (
+            "Floor is a persistent region mask. Dry and wet are mutually exclusive "
+            "condition masks clipped to the floor area."
+        ),
     }
     metadata_path = state.out_dir / f"{stem}_mask_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
