@@ -39,6 +39,12 @@ Adjust the OKLab analysis rejection threshold if moving objects or lighting chan
 python mask_mapper.py /path/to/video.mp4 --analysis-max-distance 0.06 --out-dir mask_output
 ```
 
+Load a previous annotation session by passing the saved metadata JSON:
+
+```bash
+python mask_mapper.py /path/to/video.mp4 --load-metadata mask_output/video_mask_metadata.json --out-dir mask_output
+```
+
 Disable automatic display downscaling if you need a full-resolution window:
 
 ```bash
@@ -84,4 +90,4 @@ Saving writes these files to `--out-dir`:
 - `<video>_frame_<frame>_dry_mask.png` — frame-specific binary dry-floor mask for each frame that has condition labels.
 - `<video>_frame_<frame>_wet_mask.png` — frame-specific binary wet-floor mask for each frame that has condition labels.
 - `<video>_frame_<frame>_obstruction_mask.png` — frame-specific binary obstruction mask for each frame that has condition labels.
-- `<video>_mask_metadata.json` — video dimensions, class IDs, floor-mask path, per-frame dry/wet/obstruction mask paths, and the last reference frame used.
+- `<video>_mask_metadata.json` — video dimensions, class IDs, floor-mask path, per-frame dry/wet/obstruction mask paths, and the last reference frame used. Pass this file to `--load-metadata` to continue editing saved masks.
