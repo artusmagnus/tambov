@@ -637,7 +637,7 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
     state.analysis_revision += 1
     state.render_dirty = True
     if models:
-        print(f"Wetness analysis ready for {len(models)} hex cell(s).")
+        print(f"Wetness analysis ready for {len(models)} hex cell(s). Navigate frames to view floor wetness estimates.")
     else:
         print("Wetness analysis found no hex cells with both dry and wet examples.")
 
@@ -652,10 +652,17 @@ def estimate_wetness_value(model: HexWetnessModel, bgr_color: np.ndarray) -> flo
     return min(max(position, 0.0), 1.0) * 100.0
 
 
+def analysis_visibility_mask(state: EditorState) -> np.ndarray:
+    visibility_mask = state.masks["floor"].copy()
+    visibility_mask[state.masks["obstruction"] > 0] = 0
+    return visibility_mask
+
+
 def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
+    layer_key = "analysis_floor" if state.analysis_enabled else state.selected
     cache_key = (
         state.frame_index,
-        state.selected,
+        layer_key,
         state.hex_cell_size,
         state.mask_revision,
         state.analysis_revision if state.analysis_enabled else 0,
@@ -666,7 +673,7 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
 
     hex_overlay = np.zeros_like(view.display_frame)
     hex_mask = np.zeros(view.display_frame.shape[:2], dtype=np.uint8)
-    source_mask = state.masks[state.selected]
+    source_mask = analysis_visibility_mask(state) if state.analysis_enabled else state.masks[state.selected]
     radius = max(1, state.hex_cell_size)
 
     for cell_index, polygon in enumerate(iter_hexagons(state.width, state.height, radius)):
