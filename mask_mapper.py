@@ -16,7 +16,7 @@ they are drawn.
 from __future__ import annotations
 
 import argparse
-import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -75,7 +75,7 @@ Video navigation:
   g                     jump to a frame number entered in the terminal
 
 Output:
-  s                     save masks and metadata
+  s                     save mask images
   h                     print this help in the terminal
   q / Esc               quit
 """.strip()
@@ -153,12 +153,12 @@ def parse_args() -> argparse.Namespace:
         "--out-dir",
         type=Path,
         default=Path("mask_output"),
-        help="Directory where mask PNGs and metadata JSON will be saved.",
+        help="Directory where mask PNGs will be saved.",
     )
     parser.add_argument(
-        "--load-metadata",
+        "--load-dir",
         type=Path,
-        help="Load previously saved masks from a *_mask_metadata.json file before editing.",
+        help="Reconstruct previously saved masks by scanning this directory for mask PNGs.",
     )
     parser.add_argument(
         "--scale",
@@ -510,39 +510,8 @@ def save_outputs(state: EditorState) -> None:
 
         frame_outputs[str(frame_number)] = frame_output
 
-    metadata = {
-        "video": str(state.video_path),
-        "video_width": state.width,
-        "video_height": state.height,
-        "fps": state.fps,
-        "frame_count": state.frame_count,
-        "last_reference_frame": state.frame_index,
-        "classes": {label: {"id": data["id"]} for label, data in MASK_CLASSES.items()},
-        "floor_mask": str(floor_path),
-        "frame_condition_masks": frame_outputs,
-        "notes": (
-            "Floor is a persistent region mask. Dry, wet, and obstruction are "
-            "frame-specific, mutually exclusive masks clipped to the floor area."
-        ),
-    }
-    metadata_path = state.out_dir / f"{stem}_mask_metadata.json"
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
     state.dirty = False
     print(f"Saved floor mask and {len(frame_outputs)} frame-specific annotation set(s) to: {state.out_dir.resolve()}")
-
-
-def resolve_saved_path(metadata_path: Path, saved_path: str) -> Path:
-    path = Path(saved_path)
-    if path.is_absolute() or path.exists():
-        return path
-
-    metadata_dir = metadata_path.parent
-    candidates = [metadata_dir / path, metadata_dir / path.name]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
 
 
 def load_binary_mask(path: Path, width: int, height: int) -> np.ndarray:
@@ -556,33 +525,55 @@ def load_binary_mask(path: Path, width: int, height: int) -> np.ndarray:
     return np.where(mask > 0, 255, 0).astype(np.uint8)
 
 
-def load_outputs(state: EditorState, metadata_path: Path) -> None:
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+def find_floor_mask(load_dir: Path, video_stem: str) -> Path:
+    preferred_path = load_dir / f"{video_stem}_floor_mask.png"
+    if preferred_path.exists():
+        return preferred_path
 
-    floor_path_value = metadata.get("floor_mask")
-    if not floor_path_value:
-        raise RuntimeError(f"Metadata does not contain a 'floor_mask' entry: {metadata_path}")
-
-    state.masks["floor"] = load_binary_mask(
-        resolve_saved_path(metadata_path, str(floor_path_value)), state.width, state.height
+    floor_paths = sorted(load_dir.glob("*_floor_mask.png"))
+    if len(floor_paths) == 1:
+        return floor_paths[0]
+    if not floor_paths:
+        raise RuntimeError(f"No floor mask image found in {load_dir}; expected {preferred_path.name}.")
+    raise RuntimeError(
+        f"Multiple floor mask images found in {load_dir}; expected the video-specific file {preferred_path.name}."
     )
+
+
+def parse_condition_mask_filename(path: Path, video_stem: str) -> tuple[int, str] | None:
+    escaped_stem = re.escape(video_stem)
+    pattern = rf"^{escaped_stem}_frame_(\d+)_({'|'.join(CONDITION_LABELS)})_mask\.png$"
+    match = re.match(pattern, path.name)
+    if not match:
+        return None
+
+    frame_number = int(match.group(1))
+    label = match.group(2)
+    return frame_number - 1, label
+
+
+def load_outputs(state: EditorState, load_dir: Path) -> None:
+    if not load_dir.is_dir():
+        raise RuntimeError(f"Mask load path must be a directory: {load_dir}")
+
+    video_stem = state.video_path.stem
+    state.masks["floor"] = load_binary_mask(find_floor_mask(load_dir, video_stem), state.width, state.height)
     state.condition_masks_by_frame.clear()
 
-    frame_outputs = metadata.get("frame_condition_masks", {})
-    for frame_key, frame_data in frame_outputs.items():
-        frame_index = int(frame_data.get("frame_index", int(frame_key) - 1))
-        if frame_index < 0 or (state.frame_count > 0 and frame_index >= state.frame_count):
-            print(f"Skipping frame {frame_index + 1} from metadata because it is outside this video.")
+    loaded_frames: set[int] = set()
+    for mask_path in sorted(load_dir.glob("*_frame_*_mask.png")):
+        parsed = parse_condition_mask_filename(mask_path, video_stem)
+        if parsed is None:
             continue
 
-        frame_masks = make_empty_condition_masks(state)
-        for label in CONDITION_LABELS:
-            mask_path_value = frame_data.get(f"{label}_mask")
-            if mask_path_value:
-                frame_masks[label] = load_binary_mask(
-                    resolve_saved_path(metadata_path, str(mask_path_value)), state.width, state.height
-                )
-        state.condition_masks_by_frame[frame_index] = frame_masks
+        frame_index, label = parsed
+        if frame_index < 0 or (state.frame_count > 0 and frame_index >= state.frame_count):
+            print(f"Skipping frame {frame_index + 1} mask because it is outside this video: {mask_path}")
+            continue
+
+        frame_masks = state.condition_masks_by_frame.setdefault(frame_index, make_empty_condition_masks(state))
+        frame_masks[label] = load_binary_mask(mask_path, state.width, state.height)
+        loaded_frames.add(frame_index)
 
     ensure_condition_masks(state, state.frame_index)
     bind_condition_masks_to_frame(state, state.frame_index)
@@ -590,7 +581,7 @@ def load_outputs(state: EditorState, metadata_path: Path) -> None:
     state.history.clear()
     state.dirty = False
     invalidate_masks(state)
-    print(f"Loaded masks from: {metadata_path}")
+    print(f"Loaded floor mask and {len(loaded_frames)} frame-specific annotation set(s) from: {load_dir}")
 
 
 def srgb_to_linear(value: np.ndarray) -> np.ndarray:
@@ -1006,8 +997,8 @@ def main() -> int:
     }
     state.current_condition_frame = state.frame_index
     state.display_masks = {label: make_display_mask(mask, state) for label, mask in state.masks.items()}
-    if args.load_metadata:
-        load_outputs(state, args.load_metadata)
+    if args.load_dir:
+        load_outputs(state, args.load_dir)
 
     print(HELP_TEXT)
     window_name = "wet/dry floor brush mask mapper"
