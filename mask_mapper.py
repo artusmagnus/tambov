@@ -764,7 +764,7 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         hex_overlay = make_hex_overlay(state, view)
         if view.hex_mask is not None:
             hex_pixels = view.hex_mask > 0
-            blended_hex = cv2.addWeighted(hex_overlay, 0.6, display_frame, 0.4, 0)
+            blended_hex = cv2.addWeighted(hex_overlay, 0.2, display_frame, 0.8, 0)
             overlay[hex_pixels] = blended_hex[hex_pixels]
 
     if state.cursor is not None:
