@@ -83,18 +83,25 @@ class EditorState:
     brush_size: int = 20
     is_painting: bool = False
     cursor: tuple[int, int] | None = None
+    last_paint_point: tuple[int, int] | None = None
+    render_dirty: bool = True
     masks: dict[str, np.ndarray] = field(default_factory=dict)
+    display_masks: dict[str, np.ndarray] = field(default_factory=dict)
+    masks_dirty: bool = True
     history: list[tuple[str, np.ndarray]] = field(default_factory=list)
     dirty: bool = False
 
     @property
     def display_size(self) -> tuple[int, int]:
-        return (int(self.width * self.scale), int(self.height * self.scale))
+        return (max(1, int(self.width * self.scale)), max(1, int(self.height * self.scale)))
 
 
 @dataclass
 class FrameView:
     frame: np.ndarray
+    display_frame: np.ndarray
+    base_overlay: np.ndarray | None = None
+    overlay: np.ndarray | None = None
     suppress_trackbar_callback: bool = False
 
 
@@ -127,6 +134,15 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Initial brush radius in original video pixels.",
     )
+    parser.add_argument(
+        "--max-display-width",
+        type=int,
+        default=1280,
+        help=(
+            "Automatically downscale the display window to this width for smoother editing. "
+            "Use 0 to disable automatic downscaling."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -142,6 +158,33 @@ def read_frame(capture: cv2.VideoCapture, index: int) -> np.ndarray:
     if not ok or frame is None:
         raise RuntimeError(f"Could not read frame {index} from the video.")
     return frame
+
+
+
+def make_display_frame(frame: np.ndarray, state: EditorState) -> np.ndarray:
+    if state.scale == 1.0:
+        return frame.copy()
+    return cv2.resize(frame, state.display_size, interpolation=cv2.INTER_AREA)
+
+
+def set_frame_view_frame(view: FrameView, state: EditorState, frame: np.ndarray) -> None:
+    view.frame = frame
+    view.display_frame = make_display_frame(frame, state)
+    view.base_overlay = None
+    view.overlay = None
+    state.render_dirty = True
+
+
+def make_display_mask(mask: np.ndarray, state: EditorState) -> np.ndarray:
+    if state.scale == 1.0:
+        return mask.copy()
+    return cv2.resize(mask, state.display_size, interpolation=cv2.INTER_NEAREST)
+
+
+def refresh_display_mask(state: EditorState, label: str) -> None:
+    state.display_masks[label] = make_display_mask(state.masks[label], state)
+    state.masks_dirty = True
+    state.render_dirty = True
 
 
 def scaled_point(x: int, y: int, scale: float, width: int, height: int) -> tuple[int, int]:
@@ -162,25 +205,55 @@ def push_history(state: EditorState, label: str) -> None:
 
 def paint_at(state: EditorState, point: tuple[int, int]) -> None:
     value = 255 if state.brush_mode == "draw" else 0
-    cv2.circle(state.masks[state.selected], point, state.brush_size, value, -1)
+    display_current = display_point(point, state.scale)
+    display_radius = max(1, int(round(state.brush_size * state.scale)))
+
+    if state.last_paint_point is None:
+        cv2.circle(state.masks[state.selected], point, state.brush_size, value, -1)
+        cv2.circle(state.display_masks[state.selected], display_current, display_radius, value, -1)
+    else:
+        cv2.line(
+            state.masks[state.selected],
+            state.last_paint_point,
+            point,
+            value,
+            max(1, state.brush_size * 2),
+            cv2.LINE_8,
+        )
+        cv2.line(
+            state.display_masks[state.selected],
+            display_point(state.last_paint_point, state.scale),
+            display_current,
+            value,
+            max(1, display_radius * 2),
+            cv2.LINE_8,
+        )
+    state.last_paint_point = point
     state.dirty = True
+    state.masks_dirty = True
+    state.render_dirty = True
 
 
 def begin_stroke(state: EditorState, point: tuple[int, int]) -> None:
     push_history(state, state.selected)
     state.is_painting = True
     state.cursor = point
+    state.last_paint_point = None
     paint_at(state, point)
 
 
 def end_stroke(state: EditorState) -> None:
     state.is_painting = False
+    state.last_paint_point = None
 
 
 def reset_selected_mask(state: EditorState) -> None:
     push_history(state, state.selected)
     state.masks[state.selected][:] = 0
+    state.display_masks[state.selected][:] = 0
     state.dirty = True
+    state.masks_dirty = True
+    state.render_dirty = True
     print(f"Reset '{state.selected}' mask.")
 
 
@@ -190,7 +263,9 @@ def undo(state: EditorState) -> None:
         return
     label, previous = state.history.pop()
     state.masks[label] = previous
+    refresh_display_mask(state, label)
     state.dirty = True
+    state.render_dirty = True
     print(f"Undid last change to '{label}' mask.")
 
 
@@ -199,7 +274,9 @@ def clip_to_floor(state: EditorState) -> None:
     for label in ("dry", "wet"):
         push_history(state, label)
         state.masks[label] = cv2.bitwise_and(state.masks[label], floor)
+        refresh_display_mask(state, label)
     state.dirty = True
+    state.render_dirty = True
     print("Clipped dry and wet masks to the floor-area mask.")
 
 
@@ -211,7 +288,7 @@ def set_frame(
     index: int,
 ) -> None:
     state.frame_index = clamp_frame(index, state.frame_count)
-    view.frame = read_frame(capture, state.frame_index)
+    set_frame_view_frame(view, state, read_frame(capture, state.frame_index))
     view.suppress_trackbar_callback = True
     cv2.setTrackbarPos("Frame", window_name, state.frame_index)
     view.suppress_trackbar_callback = False
@@ -253,20 +330,26 @@ def save_outputs(state: EditorState) -> None:
     print(f"Saved masks to: {state.out_dir.resolve()}")
 
 
-def make_overlay(state: EditorState, frame: np.ndarray) -> np.ndarray:
-    overlay = frame.copy()
-    color_layer = np.zeros_like(frame)
+def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
+    if view.overlay is not None and not state.render_dirty:
+        return view.overlay
 
-    for label, config in MASK_CLASSES.items():
-        mask = state.masks[label] > 0
-        color_layer[mask] = config["color"]
+    display_frame = view.display_frame
+    if view.base_overlay is None or state.masks_dirty:
+        base_overlay = display_frame.copy()
+        color_layer = np.zeros_like(display_frame)
 
-    overlay = cv2.addWeighted(color_layer, state.alpha, overlay, 1.0 - state.alpha, 0)
-    untouched = np.all(color_layer == 0, axis=2)
-    overlay[untouched] = frame[untouched]
+        for label, config in MASK_CLASSES.items():
+            color_layer[state.display_masks[label] > 0] = config["color"]
 
-    if state.scale != 1.0:
-        overlay = cv2.resize(overlay, state.display_size, interpolation=cv2.INTER_AREA)
+        mask_pixels = np.any(color_layer > 0, axis=2)
+        if np.any(mask_pixels):
+            blended = cv2.addWeighted(color_layer, state.alpha, display_frame, 1.0 - state.alpha, 0)
+            base_overlay[mask_pixels] = blended[mask_pixels]
+        view.base_overlay = base_overlay
+        state.masks_dirty = False
+
+    overlay = view.base_overlay.copy()
 
     if state.cursor is not None:
         cursor = display_point(state.cursor, state.scale)
@@ -281,6 +364,8 @@ def make_overlay(state: EditorState, frame: np.ndarray) -> np.ndarray:
     )
     cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 30), (0, 0, 0), -1)
     cv2.putText(overlay, status, (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+    view.overlay = overlay
+    state.render_dirty = False
     return overlay
 
 
@@ -288,7 +373,9 @@ def make_mouse_callback(state: EditorState) -> Callable[[int, int, int, int, obj
     def on_mouse(event: int, x: int, y: int, flags: int, userdata: object) -> None:
         del userdata
         point = scaled_point(x, y, state.scale, state.width, state.height)
-        state.cursor = point
+        if state.cursor != point:
+            state.cursor = point
+            state.render_dirty = True
 
         if event == cv2.EVENT_LBUTTONDOWN:
             begin_stroke(state, point)
@@ -313,7 +400,7 @@ def make_trackbar_callback(
         if view.suppress_trackbar_callback:
             return
         state.frame_index = clamp_frame(position, state.frame_count)
-        view.frame = read_frame(capture, state.frame_index)
+        set_frame_view_frame(view, state, read_frame(capture, state.frame_index))
         state.is_painting = False
 
     return on_frame_slider
@@ -333,11 +420,13 @@ def prompt_for_frame(state: EditorState) -> int | None:
 def set_selected_mask(state: EditorState, label: str) -> None:
     state.selected = label
     state.is_painting = False
+    state.render_dirty = True
     print(f"Selected '{label}' mask.")
 
 
 def adjust_brush_size(state: EditorState, delta: int) -> None:
     state.brush_size = min(max(state.brush_size + delta, 1), 500)
+    state.render_dirty = True
     print(f"Brush size: {state.brush_size}px")
 
 
@@ -356,6 +445,8 @@ def main() -> int:
         raise ValueError("--alpha must be between 0.0 and 1.0.")
     if args.brush_size <= 0:
         raise ValueError("--brush-size must be greater than 0.")
+    if args.max_display_width < 0:
+        raise ValueError("--max-display-width must be 0 or greater.")
 
     capture = cv2.VideoCapture(str(args.video))
     if not capture.isOpened():
@@ -365,6 +456,10 @@ def main() -> int:
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = float(capture.get(cv2.CAP_PROP_FPS))
+
+    if args.max_display_width and width > args.max_display_width:
+        args.scale = min(args.scale, args.max_display_width / width)
+        print(f"Display scale set to {args.scale:.3f} for smoother editing.")
 
     state = EditorState(
         video_path=args.video,
@@ -378,17 +473,19 @@ def main() -> int:
         brush_size=args.brush_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
     )
+    state.display_masks = {label: make_display_mask(mask, state) for label, mask in state.masks.items()}
 
     print(HELP_TEXT)
     window_name = "wet/dry floor brush mask mapper"
-    view = FrameView(frame=read_frame(capture, state.frame_index))
+    first_frame = read_frame(capture, state.frame_index)
+    view = FrameView(frame=first_frame, display_frame=make_display_frame(first_frame, state))
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.createTrackbar("Frame", window_name, 0, max(frame_count - 1, 1), make_trackbar_callback(state, view, capture))
     cv2.setMouseCallback(window_name, make_mouse_callback(state))
 
     while True:
-        cv2.imshow(window_name, make_overlay(state, view.frame))
-        key = cv2.waitKey(20) & 0xFF
+        cv2.imshow(window_name, make_overlay(state, view))
+        key = cv2.waitKey(10) & 0xFF
         if key == 255:
             continue
 
@@ -400,9 +497,11 @@ def main() -> int:
             print(HELP_TEXT)
         elif key == ord("d"):
             state.brush_mode = "draw"
+            state.render_dirty = True
             print("Brush mode: draw")
         elif key == ord("e"):
             state.brush_mode = "erase"
+            state.render_dirty = True
             print("Brush mode: erase")
         elif key in (ord("+"), ord("=")):
             adjust_brush_size(state, 5)

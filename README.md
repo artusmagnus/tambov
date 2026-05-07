@@ -24,10 +24,16 @@ python -m pip install -r requirements.txt
 python mask_mapper.py /path/to/video.mp4 --out-dir mask_output
 ```
 
-For large videos, reduce the display size while keeping saved masks at the original video resolution:
+For smoother editing on large videos, the tool automatically limits the display window to 1280 pixels wide while keeping saved masks at the original video resolution. You can also set the display scale or brush size manually:
 
 ```bash
 python mask_mapper.py /path/to/video.mp4 --scale 0.5 --brush-size 15 --out-dir mask_output
+```
+
+Disable automatic display downscaling if you need a full-resolution window:
+
+```bash
+python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_output
 ```
 
 ### Controls
