@@ -4,13 +4,13 @@ Utilities for preparing a wet/dry floor detection workflow from video.
 
 ## Interactive wet/dry floor mask mapper
 
-`mask_mapper.py` opens a video and lets you draw three separate masks:
+`mask_mapper.py` opens a video and lets you paint three separate masks with an adjustable brush:
 
 1. **floor** — the full visible floor region that should be considered by the detector.
 2. **dry** — parts of the floor that are visibly dry in the chosen reference frame.
 3. **wet** — parts of the floor that are visibly wet in the chosen reference frame.
 
-You can navigate through the video before drawing, so choose frames where each area is easiest to label. For example, draw the floor mask on a frame with a clear view, move to a frame where dry floor is visible to draw the dry mask, then move to a frame where wet floor is visible to draw the wet mask.
+You can choose the reference frame with the horizontal slider before painting, so label each area on the frame where it is easiest to see. For example, paint the floor mask on a frame with a clear view, move the slider to a frame where dry floor is visible to paint the dry mask, then move to a frame where wet floor is visible to paint the wet mask.
 
 ### Install
 
@@ -27,23 +27,24 @@ python mask_mapper.py /path/to/video.mp4 --out-dir mask_output
 For large videos, reduce the display size while keeping saved masks at the original video resolution:
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --scale 0.5 --out-dir mask_output
+python mask_mapper.py /path/to/video.mp4 --scale 0.5 --brush-size 15 --out-dir mask_output
 ```
 
 ### Controls
 
 | Action | Control |
 | --- | --- |
-| Add polygon point | Left mouse click |
-| Remove last polygon point | Right mouse click |
-| Close/apply polygon | Double left click, `c`, or Enter |
-| Select floor mask | `f` |
-| Select dry mask | `d` |
-| Select wet mask | `w` |
-| Clear unfinished polygon | `x` |
+| Paint or erase | Hold and drag left mouse button |
+| Draw mode | `d` |
+| Erase mode | `e` |
+| Increase/decrease brush size | `+` / `-` |
+| Select floor mask | `1` or `f` |
+| Select dry mask | `2` |
+| Select wet mask | `3` or `w` |
 | Reset selected mask | `r` |
-| Undo last mask edit | `u` |
+| Undo last brush stroke or reset | `u` |
 | Clip dry/wet masks to the floor mask | `i` |
+| Select frame | Horizontal `Frame` slider |
 | Next/previous frame | `n` / `p`, or right/left arrow |
 | Jump 30 frames | `]` / `[` |
 | Go to frame number | `g` |

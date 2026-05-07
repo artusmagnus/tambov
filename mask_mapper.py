@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Interactive wet/dry floor mask mapper for video files.
+"""Interactive brush-based wet/dry floor mask mapper for video files.
 
-The tool opens a video, lets you navigate to frames where the floor state is
-clear, and draw polygon masks for:
+The tool opens a video, lets you select frames with an OpenCV horizontal
+trackbar, and paint masks for:
   1. the full floor area,
   2. dry floor regions,
   3. wet floor regions.
@@ -25,32 +25,35 @@ if TYPE_CHECKING:
 
 
 MASK_CLASSES = {
-    "floor": {"id": 1, "color": (255, 180, 0), "key": "f"},
-    "dry": {"id": 2, "color": (0, 220, 0), "key": "d"},
-    "wet": {"id": 3, "color": (255, 0, 255), "key": "w"},
+    "floor": {"id": 1, "color": (255, 180, 0), "key": "1"},
+    "dry": {"id": 2, "color": (0, 220, 0), "key": "2"},
+    "wet": {"id": 3, "color": (255, 0, 255), "key": "3"},
 }
 
 HELP_TEXT = """
-Wet/dry floor mask mapper controls
-----------------------------------
+Wet/dry floor brush mask mapper controls
+----------------------------------------
 Mouse:
-  Left click            add polygon point
-  Right click           remove last polygon point
-  Double left click     close and apply polygon to the selected mask
+  Left mouse drag       paint or erase on the selected mask
+
+Brush mode:
+  d                     draw/paint mode
+  e                     erase mode
+  + / =                 increase brush size
+  - / _                 decrease brush size
 
 Mask selection:
-  f                     select floor-area mask
-  d                     select dry-floor mask
-  w                     select wet-floor mask
+  1 / f                 select floor-area mask
+  2                     select dry-floor mask
+  3 / w                 select wet-floor mask
 
-Drawing/editing:
-  c / Enter             close and apply current polygon
-  x                     clear current unfinished polygon
+Editing:
   r                     reset selected mask
-  u                     undo last applied polygon or reset
+  u                     undo last brush stroke or reset
   i                     clip dry/wet masks to the floor-area mask
 
 Video navigation:
+  Horizontal slider     choose the video frame to label against
   n / Right arrow       next frame
   p / Left arrow        previous frame
   ]                     jump forward 30 frames
@@ -76,7 +79,10 @@ class EditorState:
     alpha: float
     frame_index: int = 0
     selected: str = "floor"
-    points: list[tuple[int, int]] = field(default_factory=list)
+    brush_mode: str = "draw"
+    brush_size: int = 20
+    is_painting: bool = False
+    cursor: tuple[int, int] | None = None
     masks: dict[str, np.ndarray] = field(default_factory=dict)
     history: list[tuple[str, np.ndarray]] = field(default_factory=list)
     dirty: bool = False
@@ -84,6 +90,12 @@ class EditorState:
     @property
     def display_size(self) -> tuple[int, int]:
         return (int(self.width * self.scale), int(self.height * self.scale))
+
+
+@dataclass
+class FrameView:
+    frame: np.ndarray
+    suppress_trackbar_callback: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,12 +121,18 @@ def parse_args() -> argparse.Namespace:
         default=0.45,
         help="Overlay opacity for existing masks, from 0.0 to 1.0.",
     )
+    parser.add_argument(
+        "--brush-size",
+        type=int,
+        default=20,
+        help="Initial brush radius in original video pixels.",
+    )
     return parser.parse_args()
 
 
 def clamp_frame(index: int, frame_count: int) -> int:
     if frame_count <= 0:
-        return max(index, 0)
+        return 0
     return min(max(index, 0), frame_count - 1)
 
 
@@ -142,23 +160,26 @@ def push_history(state: EditorState, label: str) -> None:
         state.history.pop(0)
 
 
-def apply_polygon(state: EditorState) -> None:
-    if len(state.points) < 3:
-        print("Need at least 3 points before a polygon can be applied.")
-        return
-
-    push_history(state, state.selected)
-    polygon = np.array(state.points, dtype=np.int32)
-    cv2.fillPoly(state.masks[state.selected], [polygon], 255)
-    print(f"Applied polygon with {len(state.points)} points to '{state.selected}' mask.")
-    state.points.clear()
+def paint_at(state: EditorState, point: tuple[int, int]) -> None:
+    value = 255 if state.brush_mode == "draw" else 0
+    cv2.circle(state.masks[state.selected], point, state.brush_size, value, -1)
     state.dirty = True
+
+
+def begin_stroke(state: EditorState, point: tuple[int, int]) -> None:
+    push_history(state, state.selected)
+    state.is_painting = True
+    state.cursor = point
+    paint_at(state, point)
+
+
+def end_stroke(state: EditorState) -> None:
+    state.is_painting = False
 
 
 def reset_selected_mask(state: EditorState) -> None:
     push_history(state, state.selected)
     state.masks[state.selected][:] = 0
-    state.points.clear()
     state.dirty = True
     print(f"Reset '{state.selected}' mask.")
 
@@ -182,10 +203,18 @@ def clip_to_floor(state: EditorState) -> None:
     print("Clipped dry and wet masks to the floor-area mask.")
 
 
-def set_frame(state: EditorState, capture: cv2.VideoCapture, index: int) -> np.ndarray:
+def set_frame(
+    state: EditorState,
+    view: FrameView,
+    capture: cv2.VideoCapture,
+    window_name: str,
+    index: int,
+) -> None:
     state.frame_index = clamp_frame(index, state.frame_count)
-    state.points.clear()
-    return read_frame(capture, state.frame_index)
+    view.frame = read_frame(capture, state.frame_index)
+    view.suppress_trackbar_callback = True
+    cv2.setTrackbarPos("Frame", window_name, state.frame_index)
+    view.suppress_trackbar_callback = False
 
 
 def save_outputs(state: EditorState) -> None:
@@ -239,17 +268,16 @@ def make_overlay(state: EditorState, frame: np.ndarray) -> np.ndarray:
     if state.scale != 1.0:
         overlay = cv2.resize(overlay, state.display_size, interpolation=cv2.INTER_AREA)
 
-    if state.points:
-        display_points = [display_point(point, state.scale) for point in state.points]
-        for point in display_points:
-            cv2.circle(overlay, point, 4, MASK_CLASSES[state.selected]["color"], -1)
-        for start, end in zip(display_points, display_points[1:]):
-            cv2.line(overlay, start, end, MASK_CLASSES[state.selected]["color"], 2)
+    if state.cursor is not None:
+        cursor = display_point(state.cursor, state.scale)
+        brush_radius = max(1, int(round(state.brush_size * state.scale)))
+        color = MASK_CLASSES[state.selected]["color"] if state.brush_mode == "draw" else (0, 0, 255)
+        cv2.circle(overlay, cursor, brush_radius, color, 2)
 
     status = (
         f"Frame {state.frame_index + 1}/{max(state.frame_count, 1)} | "
-        f"selected: {state.selected} | points: {len(state.points)} | "
-        "h=help s=save q=quit"
+        f"mask: {state.selected} | mode: {state.brush_mode} | "
+        f"brush: {state.brush_size}px | h=help s=save q=quit"
     )
     cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 30), (0, 0, 0), -1)
     cv2.putText(overlay, status, (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
@@ -258,17 +286,37 @@ def make_overlay(state: EditorState, frame: np.ndarray) -> np.ndarray:
 
 def make_mouse_callback(state: EditorState) -> Callable[[int, int, int, int, object], None]:
     def on_mouse(event: int, x: int, y: int, flags: int, userdata: object) -> None:
-        del flags, userdata
+        del userdata
+        point = scaled_point(x, y, state.scale, state.width, state.height)
+        state.cursor = point
+
         if event == cv2.EVENT_LBUTTONDOWN:
-            state.points.append(scaled_point(x, y, state.scale, state.width, state.height))
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            if state.points:
-                removed = state.points.pop()
-                print(f"Removed point {removed}.")
-        elif event == cv2.EVENT_LBUTTONDBLCLK:
-            apply_polygon(state)
+            begin_stroke(state, point)
+        elif event == cv2.EVENT_MOUSEMOVE and state.is_painting and flags & cv2.EVENT_FLAG_LBUTTON:
+            paint_at(state, point)
+        elif event == cv2.EVENT_LBUTTONUP:
+            if state.is_painting:
+                paint_at(state, point)
+            end_stroke(state)
+        elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON) == 0:
+            end_stroke(state)
 
     return on_mouse
+
+
+def make_trackbar_callback(
+    state: EditorState,
+    view: FrameView,
+    capture: cv2.VideoCapture,
+) -> Callable[[int], None]:
+    def on_frame_slider(position: int) -> None:
+        if view.suppress_trackbar_callback:
+            return
+        state.frame_index = clamp_frame(position, state.frame_count)
+        view.frame = read_frame(capture, state.frame_index)
+        state.is_painting = False
+
+    return on_frame_slider
 
 
 def prompt_for_frame(state: EditorState) -> int | None:
@@ -280,6 +328,17 @@ def prompt_for_frame(state: EditorState) -> int | None:
     except ValueError:
         print(f"'{raw_value}' is not a valid frame number.")
         return None
+
+
+def set_selected_mask(state: EditorState, label: str) -> None:
+    state.selected = label
+    state.is_painting = False
+    print(f"Selected '{label}' mask.")
+
+
+def adjust_brush_size(state: EditorState, delta: int) -> None:
+    state.brush_size = min(max(state.brush_size + delta, 1), 500)
+    print(f"Brush size: {state.brush_size}px")
 
 
 def main() -> int:
@@ -295,6 +354,8 @@ def main() -> int:
         raise ValueError("--scale must be greater than 0.")
     if not 0 <= args.alpha <= 1:
         raise ValueError("--alpha must be between 0.0 and 1.0.")
+    if args.brush_size <= 0:
+        raise ValueError("--brush-size must be greater than 0.")
 
     capture = cv2.VideoCapture(str(args.video))
     if not capture.isOpened():
@@ -314,17 +375,19 @@ def main() -> int:
         fps=fps,
         scale=args.scale,
         alpha=args.alpha,
+        brush_size=args.brush_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
     )
 
     print(HELP_TEXT)
-    frame = read_frame(capture, state.frame_index)
-    window_name = "wet/dry floor mask mapper"
+    window_name = "wet/dry floor brush mask mapper"
+    view = FrameView(frame=read_frame(capture, state.frame_index))
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.createTrackbar("Frame", window_name, 0, max(frame_count - 1, 1), make_trackbar_callback(state, view, capture))
     cv2.setMouseCallback(window_name, make_mouse_callback(state))
 
     while True:
-        cv2.imshow(window_name, make_overlay(state, frame))
+        cv2.imshow(window_name, make_overlay(state, view.frame))
         key = cv2.waitKey(20) & 0xFF
         if key == 255:
             continue
@@ -335,18 +398,22 @@ def main() -> int:
             break
         if key == ord("h"):
             print(HELP_TEXT)
-        elif key in (ord("f"), ord("d"), ord("w")):
-            for label, config in MASK_CLASSES.items():
-                if key == ord(config["key"]):
-                    state.selected = label
-                    state.points.clear()
-                    print(f"Selected '{label}' mask.")
-                    break
-        elif key in (ord("c"), 13):
-            apply_polygon(state)
-        elif key == ord("x"):
-            state.points.clear()
-            print("Cleared unfinished polygon.")
+        elif key == ord("d"):
+            state.brush_mode = "draw"
+            print("Brush mode: draw")
+        elif key == ord("e"):
+            state.brush_mode = "erase"
+            print("Brush mode: erase")
+        elif key in (ord("+"), ord("=")):
+            adjust_brush_size(state, 5)
+        elif key in (ord("-"), ord("_")):
+            adjust_brush_size(state, -5)
+        elif key in (ord("1"), ord("f")):
+            set_selected_mask(state, "floor")
+        elif key == ord("2"):
+            set_selected_mask(state, "dry")
+        elif key in (ord("3"), ord("w")):
+            set_selected_mask(state, "wet")
         elif key == ord("r"):
             reset_selected_mask(state)
         elif key == ord("u"):
@@ -356,17 +423,17 @@ def main() -> int:
         elif key == ord("s"):
             save_outputs(state)
         elif key in (ord("n"), 83):
-            frame = set_frame(state, capture, state.frame_index + 1)
+            set_frame(state, view, capture, window_name, state.frame_index + 1)
         elif key in (ord("p"), 81):
-            frame = set_frame(state, capture, state.frame_index - 1)
+            set_frame(state, view, capture, window_name, state.frame_index - 1)
         elif key == ord("]"):
-            frame = set_frame(state, capture, state.frame_index + 30)
+            set_frame(state, view, capture, window_name, state.frame_index + 30)
         elif key == ord("["):
-            frame = set_frame(state, capture, state.frame_index - 30)
+            set_frame(state, view, capture, window_name, state.frame_index - 30)
         elif key == ord("g"):
             target = prompt_for_frame(state)
             if target is not None:
-                frame = set_frame(state, capture, target)
+                set_frame(state, view, capture, window_name, target)
 
     capture.release()
     cv2.destroyAllWindows()
