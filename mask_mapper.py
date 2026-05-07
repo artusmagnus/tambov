@@ -57,7 +57,7 @@ Mask selection:
 
 Hex visualization:
   Space                 toggle averaged-color hexagon view
-  Enter                 run dry-to-wet OKLab hex analysis (0=green, 100=red)
+  Enter                 run dry-to-wet OKLab hex analysis (0=red, 100=green)
   1 / 2 / 3 / 4         show hexagons only for the selected mask layer
 
 Editing:
@@ -539,7 +539,7 @@ def bgr_to_oklab(bgr_color: np.ndarray) -> np.ndarray:
 
 def wetness_to_bgr(value: float) -> tuple[int, int, int]:
     value = min(max(value, 0.0), 100.0) / 100.0
-    return (0, int(round(255 * (1.0 - value))), int(round(255 * value)))
+    return (0, int(round(255 * value)), int(round(255 * (1.0 - value))))
 
 
 def average_bgr_in_polygon(frame: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> np.ndarray | None:
@@ -658,6 +658,22 @@ def analysis_visibility_mask(state: EditorState) -> np.ndarray:
     return visibility_mask
 
 
+def fill_missing_hex_texture(hex_overlay: np.ndarray, display_polygon: np.ndarray, square_size: int) -> None:
+    bounds = polygon_bounds(display_polygon, hex_overlay.shape[1], hex_overlay.shape[0])
+    if bounds is None:
+        return
+    x0, y0, x1, y1 = bounds
+    local_polygon = display_polygon - np.array([x0, y0], dtype=np.int32)
+    polygon_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    cv2.fillPoly(polygon_mask, [local_polygon], 255)
+
+    rows, cols = np.indices(polygon_mask.shape)
+    checker = ((rows // square_size) + (cols // square_size)) % 2 == 0
+    patch = hex_overlay[y0:y1, x0:x1]
+    patch[(polygon_mask > 0) & checker] = (255, 0, 255)
+    patch[(polygon_mask > 0) & ~checker] = (0, 0, 0)
+
+
 def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     layer_key = "analysis_floor" if state.analysis_enabled else state.selected
     cache_key = (
@@ -691,6 +707,10 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         wetness_text: str | None = None
         if state.analysis_enabled:
             if cell_index not in state.wetness_models:
+                square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
+                fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
+                cv2.fillPoly(hex_mask, [display_polygon], 255)
+                cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
                 continue
             wetness_value = estimate_wetness_value(state.wetness_models[cell_index], average_color)
             color = wetness_to_bgr(wetness_value)
