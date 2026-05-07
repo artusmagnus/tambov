@@ -57,6 +57,7 @@ Mask selection:
 
 Hex visualization:
   Space                 toggle averaged-color hexagon view
+  Enter                 run dry-to-wet OKLab hex analysis (0=green, 100=red)
   1 / 2 / 3 / 4         show hexagons only for the selected mask layer
 
 Editing:
@@ -87,6 +88,12 @@ class MaskSnapshot:
 
 
 @dataclass
+class HexWetnessModel:
+    dry_oklab: np.ndarray
+    wet_oklab: np.ndarray
+
+
+@dataclass
 class EditorState:
     video_path: Path
     out_dir: Path
@@ -103,6 +110,9 @@ class EditorState:
     hex_enabled: bool = False
     hex_cell_size: int = 40
     mask_revision: int = 0
+    analysis_enabled: bool = False
+    analysis_revision: int = 0
+    wetness_models: dict[int, HexWetnessModel] = field(default_factory=dict)
     is_painting: bool = False
     cursor: tuple[int, int] | None = None
     last_paint_point: tuple[int, int] | None = None
@@ -128,7 +138,7 @@ class FrameView:
     overlay: np.ndarray | None = None
     hex_overlay: np.ndarray | None = None
     hex_mask: np.ndarray | None = None
-    hex_cache_key: tuple[int, str, int, int, int] | None = None
+    hex_cache_key: tuple[int, str, int, int, int, int] | None = None
     suppress_trackbar_callback: bool = False
 
 
@@ -506,6 +516,51 @@ def save_outputs(state: EditorState) -> None:
     print(f"Saved floor mask and {len(frame_outputs)} frame-specific annotation set(s) to: {state.out_dir.resolve()}")
 
 
+def srgb_to_linear(value: np.ndarray) -> np.ndarray:
+    return np.where(value <= 0.04045, value / 12.92, ((value + 0.055) / 1.055) ** 2.4)
+
+
+def bgr_to_oklab(bgr_color: np.ndarray) -> np.ndarray:
+    rgb = np.array([bgr_color[2], bgr_color[1], bgr_color[0]], dtype=np.float64) / 255.0
+    red, green, blue = srgb_to_linear(rgb)
+    lightness = 0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue
+    medium = 0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue
+    short = 0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue
+    l_root, m_root, s_root = np.cbrt([lightness, medium, short])
+    return np.array(
+        [
+            0.2104542553 * l_root + 0.7936177850 * m_root - 0.0040720468 * s_root,
+            1.9779984951 * l_root - 2.4285922050 * m_root + 0.4505937099 * s_root,
+            0.0259040371 * l_root + 0.7827717662 * m_root - 0.8086757660 * s_root,
+        ],
+        dtype=np.float64,
+    )
+
+
+def wetness_to_bgr(value: float) -> tuple[int, int, int]:
+    value = min(max(value, 0.0), 100.0) / 100.0
+    return (0, int(round(255 * (1.0 - value))), int(round(255 * value)))
+
+
+def average_bgr_in_polygon(frame: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> np.ndarray | None:
+    x0, y0, x1, y1 = bounds
+    local_polygon = polygon - np.array([x0, y0], dtype=np.int32)
+    cell_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    cv2.fillPoly(cell_mask, [local_polygon], 255)
+    cell_pixels = cell_mask > 0
+    if not np.any(cell_pixels):
+        return None
+    return frame[y0:y1, x0:x1][cell_pixels].mean(axis=0)
+
+
+def polygon_overlaps_mask(mask: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> bool:
+    x0, y0, x1, y1 = bounds
+    local_polygon = polygon - np.array([x0, y0], dtype=np.int32)
+    cell_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    cv2.fillPoly(cell_mask, [local_polygon], 255)
+    return bool(np.any((cell_mask > 0) & (mask[y0:y1, x0:x1] > 0)))
+
+
 def hexagon_points(center_x: float, center_y: float, radius: float) -> np.ndarray:
     points = []
     for angle_degrees in range(0, 360, 60):
@@ -539,8 +594,73 @@ def polygon_bounds(polygon: np.ndarray, width: int, height: int) -> tuple[int, i
     return x0, y0, x1, y1
 
 
+def collect_hex_color_samples(
+    state: EditorState,
+    capture: cv2.VideoCapture,
+) -> dict[int, dict[str, list[np.ndarray]]]:
+    samples: dict[int, dict[str, list[np.ndarray]]] = {}
+    polygons = list(iter_hexagons(state.width, state.height, max(1, state.hex_cell_size)))
+    for frame_index, frame_masks in sorted(state.condition_masks_by_frame.items()):
+        if not (np.any(frame_masks["dry"] > 0) or np.any(frame_masks["wet"] > 0)):
+            continue
+        frame = read_frame(capture, frame_index)
+        for cell_index, polygon in enumerate(polygons):
+            bounds = polygon_bounds(polygon, state.width, state.height)
+            if bounds is None:
+                continue
+            average_color = average_bgr_in_polygon(frame, polygon, bounds)
+            if average_color is None:
+                continue
+            cell_samples = samples.setdefault(cell_index, {"dry": [], "wet": []})
+            if polygon_overlaps_mask(frame_masks["dry"], polygon, bounds):
+                cell_samples["dry"].append(bgr_to_oklab(average_color))
+            if polygon_overlaps_mask(frame_masks["wet"], polygon, bounds):
+                cell_samples["wet"].append(bgr_to_oklab(average_color))
+    return samples
+
+
+def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
+    samples = collect_hex_color_samples(state, capture)
+    models: dict[int, HexWetnessModel] = {}
+    for cell_index, cell_samples in samples.items():
+        if not cell_samples["dry"] or not cell_samples["wet"]:
+            continue
+        dry_oklab = np.mean(cell_samples["dry"], axis=0)
+        wet_oklab = np.mean(cell_samples["wet"], axis=0)
+        if float(np.dot(wet_oklab - dry_oklab, wet_oklab - dry_oklab)) <= 1e-12:
+            continue
+        models[cell_index] = HexWetnessModel(dry_oklab=dry_oklab, wet_oklab=wet_oklab)
+
+    state.wetness_models = models
+    state.analysis_enabled = bool(models)
+    state.hex_enabled = True
+    state.analysis_revision += 1
+    state.render_dirty = True
+    if models:
+        print(f"Wetness analysis ready for {len(models)} hex cell(s).")
+    else:
+        print("Wetness analysis found no hex cells with both dry and wet examples.")
+
+
+def estimate_wetness_value(model: HexWetnessModel, bgr_color: np.ndarray) -> float:
+    current_oklab = bgr_to_oklab(bgr_color)
+    axis = model.wet_oklab - model.dry_oklab
+    denominator = float(np.dot(axis, axis))
+    if denominator <= 1e-12:
+        return 0.0
+    position = float(np.dot(current_oklab - model.dry_oklab, axis) / denominator)
+    return min(max(position, 0.0), 1.0) * 100.0
+
+
 def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
-    cache_key = (state.frame_index, state.selected, state.hex_cell_size, state.mask_revision, id(view.frame))
+    cache_key = (
+        state.frame_index,
+        state.selected,
+        state.hex_cell_size,
+        state.mask_revision,
+        state.analysis_revision if state.analysis_enabled else 0,
+        id(view.frame),
+    )
     if view.hex_overlay is not None and view.hex_cache_key == cache_key:
         return view.hex_overlay
 
@@ -549,26 +669,43 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     source_mask = state.masks[state.selected]
     radius = max(1, state.hex_cell_size)
 
-    for polygon in iter_hexagons(state.width, state.height, radius):
+    for cell_index, polygon in enumerate(iter_hexagons(state.width, state.height, radius)):
         bounds = polygon_bounds(polygon, state.width, state.height)
         if bounds is None:
             continue
-        x0, y0, x1, y1 = bounds
-        local_polygon = polygon - np.array([x0, y0], dtype=np.int32)
-        cell_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-        cv2.fillPoly(cell_mask, [local_polygon], 255)
-
-        cell_pixels = cell_mask > 0
-        layer_pixels = cell_pixels & (source_mask[y0:y1, x0:x1] > 0)
-        if not np.any(layer_pixels):
+        if not polygon_overlaps_mask(source_mask, polygon, bounds):
             continue
 
-        average_color = view.frame[y0:y1, x0:x1][cell_pixels].mean(axis=0)
+        average_color = average_bgr_in_polygon(view.frame, polygon, bounds)
+        if average_color is None:
+            continue
+
         display_polygon = np.round(polygon * state.scale).astype(np.int32)
-        color = tuple(int(channel) for channel in average_color)
+        wetness_text: str | None = None
+        if state.analysis_enabled:
+            if cell_index not in state.wetness_models:
+                continue
+            wetness_value = estimate_wetness_value(state.wetness_models[cell_index], average_color)
+            color = wetness_to_bgr(wetness_value)
+            if state.hex_cell_size * state.scale >= 18:
+                wetness_text = f"{wetness_value:.0f}"
+        else:
+            color = tuple(int(channel) for channel in average_color)
         cv2.fillPoly(hex_overlay, [display_polygon], color)
         cv2.fillPoly(hex_mask, [display_polygon], 255)
         cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
+        if wetness_text is not None:
+            center = tuple(np.round(display_polygon.mean(axis=0)).astype(int))
+            cv2.putText(
+                hex_overlay,
+                wetness_text,
+                center,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
     view.hex_overlay = hex_overlay
     view.hex_mask = hex_mask
@@ -611,7 +748,7 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     status = (
         f"Frame {state.frame_index + 1}/{max(state.frame_count, 1)} | "
         f"mask: {state.selected} | mode: {state.brush_mode} | "
-        f"brush: {state.brush_size}px | hex: {'on' if state.hex_enabled else 'off'} {state.hex_cell_size}px | h=help s=save q=quit"
+        f"brush: {state.brush_size}px | hex: {'analysis' if state.analysis_enabled else ('on' if state.hex_enabled else 'off')} {state.hex_cell_size}px | h=help s=save q=quit"
     )
     cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 30), (0, 0, 0), -1)
     cv2.putText(overlay, status, (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
@@ -683,7 +820,11 @@ def adjust_brush_size(state: EditorState, delta: int) -> None:
 
 
 def adjust_hex_cell_size(state: EditorState, delta: int) -> None:
+    old_size = state.hex_cell_size
     state.hex_cell_size = min(max(state.hex_cell_size + delta, 5), 500)
+    if state.hex_cell_size != old_size and state.analysis_enabled:
+        state.analysis_enabled = False
+        print("Hex cell size changed; press Enter to rerun wetness analysis.")
     state.render_dirty = True
     print(f"Hex cell size: {state.hex_cell_size}px")
 
@@ -771,6 +912,8 @@ def main() -> int:
             state.brush_mode = "erase"
             state.render_dirty = True
             print("Brush mode: erase")
+        elif key in (10, 13):
+            run_wetness_analysis(state, capture)
         elif key == ord(" "):
             toggle_hex_view(state)
         elif key in (ord("+"), ord("=")):

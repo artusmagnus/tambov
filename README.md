@@ -48,6 +48,7 @@ python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_ou
 | Erase mode | `e` |
 | Increase/decrease brush size | `+` / `-` when hex view is off |
 | Toggle averaged-color hex view | Space |
+| Run OKLab dry-to-wet analysis | Enter |
 | Increase/decrease hex cell size | `+` / `-` when hex view is on |
 | Select floor mask / floor hex layer | `1` or `f` |
 | Select dry mask / dry hex layer | `2` |
@@ -66,6 +67,8 @@ python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_ou
 ### Hex visualization
 
 Press Space to toggle a hexagon visualization of the current frame. The frame is divided into a hexagon mesh, each visible hexagon is filled with the average color of the original image pixels inside that cell, and `+` / `-` changes the hex cell size while the view is enabled. Press `1`, `2`, `3`, or `4` to show hexagons only for the corresponding mask layer: floor, dry, wet, or obstruction.
+
+Press Enter to run dry-to-wet analysis for the current hex cell size. The tool finds hex cells that have both dry and wet examples somewhere in the annotated video, converts their average colors to OKLab, and treats the line from the dry color to the wet color as a 0-100 wetness axis. After analysis, the hex view uses green for dry-like cells near `0` and red for wet-like cells near `100` on the selected frame.
 
 ### Output files
 
