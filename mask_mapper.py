@@ -4,11 +4,12 @@
 The tool opens a video, lets you select frames with an OpenCV horizontal
 trackbar, and paint masks for:
   1. the full floor area,
-  2. dry floor regions,
-  3. wet floor regions.
+  2. dry floor regions on individual frames,
+  3. wet floor regions on individual frames.
 
-Masks are stored in video resolution as binary PNG files plus a combined label
-map that can be used for later model training or rule-based experiments.
+The floor mask is persistent across the whole video. Dry and wet masks are
+frame-specific condition labels stored at video resolution for the frames where
+they are drawn.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ Wet/dry floor brush mask mapper controls
 Mouse:
   Left mouse drag       paint or erase on the selected mask
                         Dry/wet painting is limited to the floor mask
+                        Dry/wet labels apply only to the selected frame
 
 Brush mode:
   d                     draw/paint mode
@@ -51,7 +53,7 @@ Mask selection:
 Editing:
   r                     reset selected mask
   u                     undo last brush stroke or reset
-  i                     clip dry/wet masks to the floor-area mask
+  i                     clip all frame dry/wet masks to the floor-area mask
 
 Video navigation:
   Horizontal slider     choose the video frame to label against
@@ -66,6 +68,13 @@ Output:
   h                     print this help in the terminal
   q / Esc               quit
 """.strip()
+
+
+@dataclass
+class MaskSnapshot:
+    label: str
+    frame_index: int | None
+    mask: np.ndarray
 
 
 @dataclass
@@ -88,8 +97,10 @@ class EditorState:
     render_dirty: bool = True
     masks: dict[str, np.ndarray] = field(default_factory=dict)
     display_masks: dict[str, np.ndarray] = field(default_factory=dict)
+    condition_masks_by_frame: dict[int, dict[str, np.ndarray]] = field(default_factory=dict)
+    current_condition_frame: int = 0
     masks_dirty: bool = True
-    history: list[list[tuple[str, np.ndarray]]] = field(default_factory=list)
+    history: list[list[MaskSnapshot]] = field(default_factory=list)
     dirty: bool = False
 
     @property
@@ -188,6 +199,44 @@ def refresh_display_mask(state: EditorState, label: str) -> None:
     state.render_dirty = True
 
 
+
+
+def make_empty_mask(state: EditorState) -> np.ndarray:
+    return np.zeros((state.height, state.width), dtype=np.uint8)
+
+
+def make_empty_condition_masks(state: EditorState) -> dict[str, np.ndarray]:
+    return {"dry": make_empty_mask(state), "wet": make_empty_mask(state)}
+
+
+def ensure_condition_masks(state: EditorState, frame_index: int) -> dict[str, np.ndarray]:
+    if frame_index not in state.condition_masks_by_frame:
+        state.condition_masks_by_frame[frame_index] = make_empty_condition_masks(state)
+    return state.condition_masks_by_frame[frame_index]
+
+
+def bind_condition_masks_to_frame(state: EditorState, frame_index: int) -> None:
+    frame_masks = ensure_condition_masks(state, frame_index)
+    state.current_condition_frame = frame_index
+    state.masks["dry"] = frame_masks["dry"]
+    state.masks["wet"] = frame_masks["wet"]
+    refresh_display_mask(state, "dry")
+    refresh_display_mask(state, "wet")
+
+
+def condition_history_entries(state: EditorState, labels: list[str] | tuple[str, ...], frame_index: int | None = None) -> list[tuple[str, int | None]]:
+    if frame_index is None:
+        frame_index = state.current_condition_frame
+    return [(label, frame_index if label in ("dry", "wet") else None) for label in labels]
+
+
+def all_condition_history_entries(state: EditorState) -> list[tuple[str, int | None]]:
+    entries: list[tuple[str, int | None]] = []
+    for frame_index in sorted(state.condition_masks_by_frame):
+        entries.extend([("dry", frame_index), ("wet", frame_index)])
+    return entries
+
+
 def scaled_point(x: int, y: int, scale: float, width: int, height: int) -> tuple[int, int]:
     original_x = int(round(x / scale))
     original_y = int(round(y / scale))
@@ -198,10 +247,30 @@ def display_point(point: tuple[int, int], scale: float) -> tuple[int, int]:
     return int(round(point[0] * scale)), int(round(point[1] * scale))
 
 
-def push_history(state: EditorState, labels: str | list[str] | tuple[str, ...]) -> None:
-    if isinstance(labels, str):
-        labels = [labels]
-    snapshot = [(label, state.masks[label].copy()) for label in dict.fromkeys(labels)]
+def history_mask(state: EditorState, label: str, frame_index: int | None) -> np.ndarray:
+    if label == "floor":
+        return state.masks["floor"]
+    if frame_index is None:
+        frame_index = state.current_condition_frame
+    return ensure_condition_masks(state, frame_index)[label]
+
+
+def push_history(state: EditorState, entries: str | list[str] | tuple[str, ...] | list[tuple[str, int | None]]) -> None:
+    normalized_entries: list[tuple[str, int | None]] = []
+    if isinstance(entries, str):
+        normalized_entries = condition_history_entries(state, [entries])
+    else:
+        for entry in entries:
+            if isinstance(entry, tuple):
+                normalized_entries.append(entry)
+            else:
+                normalized_entries.extend(condition_history_entries(state, [entry]))
+
+    unique_entries = list(dict.fromkeys(normalized_entries))
+    snapshot = [
+        MaskSnapshot(label=label, frame_index=frame_index, mask=history_mask(state, label, frame_index).copy())
+        for label, frame_index in unique_entries
+    ]
     state.history.append(snapshot)
     if len(state.history) > 100:
         state.history.pop(0)
@@ -229,10 +298,12 @@ def apply_dry_wet_floor_rules(state: EditorState, stroke_mask: np.ndarray, displ
         else:
             state.masks["floor"][stroke_mask > 0] = 0
             state.display_masks["floor"][display_stroke_mask > 0] = 0
-            for label in ("dry", "wet"):
-                state.masks[label][state.masks["floor"] == 0] = 0
-                state.display_masks[label][state.display_masks["floor"] == 0] = 0
-                changed_labels.append(label)
+            for frame_masks in state.condition_masks_by_frame.values():
+                for label in ("dry", "wet"):
+                    frame_masks[label][state.masks["floor"] == 0] = 0
+            refresh_display_mask(state, "dry")
+            refresh_display_mask(state, "wet")
+            changed_labels.extend(["dry", "wet"])
         return changed_labels
 
     if state.brush_mode == "erase":
@@ -272,11 +343,11 @@ def paint_at(state: EditorState, point: tuple[int, int]) -> None:
 
 
 def begin_stroke(state: EditorState, point: tuple[int, int]) -> None:
-    labels = [state.selected]
+    labels = condition_history_entries(state, [state.selected])
     if state.selected == "floor" and state.brush_mode == "erase":
-        labels.extend(["dry", "wet"])
+        labels.extend(all_condition_history_entries(state))
     elif state.selected in ("dry", "wet") and state.brush_mode == "draw":
-        labels.append(opposite_floor_condition(state.selected))
+        labels.extend(condition_history_entries(state, [opposite_floor_condition(state.selected)]))
     push_history(state, labels)
     state.is_painting = True
     state.cursor = point
@@ -290,16 +361,18 @@ def end_stroke(state: EditorState) -> None:
 
 
 def reset_selected_mask(state: EditorState) -> None:
-    labels = [state.selected]
+    labels = condition_history_entries(state, [state.selected])
     if state.selected == "floor":
-        labels.extend(["dry", "wet"])
+        labels.extend(all_condition_history_entries(state))
     push_history(state, labels)
     state.masks[state.selected][:] = 0
     state.display_masks[state.selected][:] = 0
     if state.selected == "floor":
-        for label in ("dry", "wet"):
-            state.masks[label][:] = 0
-            state.display_masks[label][:] = 0
+        for frame_masks in state.condition_masks_by_frame.values():
+            for label in ("dry", "wet"):
+                frame_masks[label][:] = 0
+        refresh_display_mask(state, "dry")
+        refresh_display_mask(state, "wet")
     state.dirty = True
     state.masks_dirty = True
     state.render_dirty = True
@@ -312,10 +385,18 @@ def undo(state: EditorState) -> None:
         return
     snapshot = state.history.pop()
     restored_labels = []
-    for label, previous in snapshot:
-        state.masks[label] = previous
-        refresh_display_mask(state, label)
-        restored_labels.append(label)
+    for item in snapshot:
+        if item.label == "floor":
+            state.masks["floor"] = item.mask
+            refresh_display_mask(state, "floor")
+            restored_labels.append("floor")
+        elif item.frame_index is not None:
+            frame_masks = ensure_condition_masks(state, item.frame_index)
+            frame_masks[item.label] = item.mask
+            if item.frame_index == state.current_condition_frame:
+                state.masks[item.label] = item.mask
+                refresh_display_mask(state, item.label)
+            restored_labels.append(f"{item.label}@frame{item.frame_index + 1}")
     state.dirty = True
     state.render_dirty = True
     print(f"Undid last change to {', '.join(restored_labels)} mask(s).")
@@ -323,13 +404,14 @@ def undo(state: EditorState) -> None:
 
 def clip_to_floor(state: EditorState) -> None:
     floor = state.masks["floor"]
-    push_history(state, ["dry", "wet"])
-    for label in ("dry", "wet"):
-        state.masks[label] = cv2.bitwise_and(state.masks[label], floor)
-        refresh_display_mask(state, label)
+    push_history(state, all_condition_history_entries(state))
+    for frame_masks in state.condition_masks_by_frame.values():
+        for label in ("dry", "wet"):
+            frame_masks[label] = cv2.bitwise_and(frame_masks[label], floor)
+    bind_condition_masks_to_frame(state, state.current_condition_frame)
     state.dirty = True
     state.render_dirty = True
-    print("Clipped dry and wet masks to the floor-area mask.")
+    print("Clipped dry and wet masks on every annotated frame to the floor-area mask.")
 
 
 def set_frame(
@@ -340,28 +422,57 @@ def set_frame(
     index: int,
 ) -> None:
     state.frame_index = clamp_frame(index, state.frame_count)
+    bind_condition_masks_to_frame(state, state.frame_index)
     set_frame_view_frame(view, state, read_frame(capture, state.frame_index))
     view.suppress_trackbar_callback = True
     cv2.setTrackbarPos("Frame", window_name, state.frame_index)
     view.suppress_trackbar_callback = False
 
 
+def has_condition_labels(frame_masks: dict[str, np.ndarray]) -> bool:
+    return bool(np.any(frame_masks["dry"] > 0) or np.any(frame_masks["wet"] > 0))
+
+
 def save_outputs(state: EditorState) -> None:
     state.out_dir.mkdir(parents=True, exist_ok=True)
     stem = state.video_path.stem
 
-    saved_masks: dict[str, str] = {}
-    for label, mask in state.masks.items():
-        path = state.out_dir / f"{stem}_{label}_mask.png"
-        cv2.imwrite(str(path), mask)
-        saved_masks[label] = str(path)
+    floor_path = state.out_dir / f"{stem}_floor_mask.png"
+    cv2.imwrite(str(floor_path), state.masks["floor"])
 
-    combined = np.zeros((state.height, state.width), dtype=np.uint8)
-    combined[state.masks["floor"] > 0] = MASK_CLASSES["floor"]["id"]
-    combined[state.masks["dry"] > 0] = MASK_CLASSES["dry"]["id"]
-    combined[state.masks["wet"] > 0] = MASK_CLASSES["wet"]["id"]
-    combined_path = state.out_dir / f"{stem}_combined_labels.png"
-    cv2.imwrite(str(combined_path), combined)
+    frame_outputs: dict[str, dict[str, str | int]] = {}
+    for frame_index, frame_masks in sorted(state.condition_masks_by_frame.items()):
+        if not has_condition_labels(frame_masks):
+            continue
+
+        dry = cv2.bitwise_and(frame_masks["dry"], state.masks["floor"])
+        wet = cv2.bitwise_and(frame_masks["wet"], state.masks["floor"])
+        wet[dry > 0] = 0
+        frame_masks["dry"] = dry
+        frame_masks["wet"] = wet
+        if frame_index == state.current_condition_frame:
+            bind_condition_masks_to_frame(state, frame_index)
+
+        frame_number = frame_index + 1
+        prefix = f"{stem}_frame_{frame_number:06d}"
+        dry_path = state.out_dir / f"{prefix}_dry_mask.png"
+        wet_path = state.out_dir / f"{prefix}_wet_mask.png"
+        combined_path = state.out_dir / f"{prefix}_combined_labels.png"
+
+        combined = np.zeros((state.height, state.width), dtype=np.uint8)
+        combined[state.masks["floor"] > 0] = MASK_CLASSES["floor"]["id"]
+        combined[dry > 0] = MASK_CLASSES["dry"]["id"]
+        combined[wet > 0] = MASK_CLASSES["wet"]["id"]
+
+        cv2.imwrite(str(dry_path), dry)
+        cv2.imwrite(str(wet_path), wet)
+        cv2.imwrite(str(combined_path), combined)
+        frame_outputs[str(frame_number)] = {
+            "frame_index": frame_index,
+            "dry_mask": str(dry_path),
+            "wet_mask": str(wet_path),
+            "combined_label_map": str(combined_path),
+        }
 
     metadata = {
         "video": str(state.video_path),
@@ -371,18 +482,18 @@ def save_outputs(state: EditorState) -> None:
         "frame_count": state.frame_count,
         "last_reference_frame": state.frame_index,
         "classes": {label: {"id": data["id"]} for label, data in MASK_CLASSES.items()},
-        "binary_masks": saved_masks,
-        "combined_label_map": str(combined_path),
+        "floor_mask": str(floor_path),
+        "frame_condition_masks": frame_outputs,
         "notes": (
-            "Floor is a persistent region mask. Dry and wet are mutually exclusive "
-            "condition masks clipped to the floor area."
+            "Floor is a persistent region mask. Dry and wet are frame-specific, "
+            "mutually exclusive condition masks clipped to the floor area."
         ),
     }
     metadata_path = state.out_dir / f"{stem}_mask_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     state.dirty = False
-    print(f"Saved masks to: {state.out_dir.resolve()}")
+    print(f"Saved floor mask and {len(frame_outputs)} frame-specific dry/wet annotation set(s) to: {state.out_dir.resolve()}")
 
 
 def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
@@ -405,7 +516,6 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         state.masks_dirty = False
 
     overlay = view.base_overlay.copy()
-
     if state.cursor is not None:
         cursor = display_point(state.cursor, state.scale)
         brush_radius = max(1, int(round(state.brush_size * state.scale)))
@@ -455,6 +565,7 @@ def make_trackbar_callback(
         if view.suppress_trackbar_callback:
             return
         state.frame_index = clamp_frame(position, state.frame_count)
+        bind_condition_masks_to_frame(state, state.frame_index)
         set_frame_view_frame(view, state, read_frame(capture, state.frame_index))
         state.is_painting = False
 
@@ -528,6 +639,11 @@ def main() -> int:
         brush_size=args.brush_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
     )
+    state.condition_masks_by_frame[state.frame_index] = {
+        "dry": state.masks["dry"],
+        "wet": state.masks["wet"],
+    }
+    state.current_condition_frame = state.frame_index
     state.display_masks = {label: make_display_mask(mask, state) for label, mask in state.masks.items()}
 
     print(HELP_TEXT)
