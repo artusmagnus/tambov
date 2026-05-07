@@ -46,11 +46,13 @@ python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_ou
 | Paint or erase | Hold and drag left mouse button |
 | Draw mode | `d` |
 | Erase mode | `e` |
-| Increase/decrease brush size | `+` / `-` |
-| Select floor mask | `1` or `f` |
-| Select dry mask | `2` |
-| Select wet mask | `3` or `w` |
-| Select obstruction mask | `4` or `o` |
+| Increase/decrease brush size | `+` / `-` when hex view is off |
+| Toggle averaged-color hex view | Space |
+| Increase/decrease hex cell size | `+` / `-` when hex view is on |
+| Select floor mask / floor hex layer | `1` or `f` |
+| Select dry mask / dry hex layer | `2` |
+| Select wet mask / wet hex layer | `3` or `w` |
+| Select obstruction mask / obstruction hex layer | `4` or `o` |
 | Reset selected mask | `r` |
 | Undo last brush stroke or reset | `u` |
 | Clip all frame-specific condition masks to the floor mask | `i` |
@@ -60,6 +62,10 @@ python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_ou
 | Go to frame number | `g` |
 | Save masks | `s` |
 | Quit | `q` or Esc |
+
+### Hex visualization
+
+Press Space to toggle a hexagon visualization of the current frame. The frame is divided into a hexagon mesh, each visible hexagon is filled with the average color of the original image pixels inside that cell, and `+` / `-` changes the hex cell size while the view is enabled. Press `1`, `2`, `3`, or `4` to show hexagons only for the corresponding mask layer: floor, dry, wet, or obstruction.
 
 ### Output files
 

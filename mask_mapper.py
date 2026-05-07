@@ -46,14 +46,18 @@ Mouse:
 Brush mode:
   d                     draw/paint mode
   e                     erase mode
-  + / =                 increase brush size
-  - / _                 decrease brush size
+  + / =                 increase brush size, or hex cell size when hex view is on
+  - / _                 decrease brush size, or hex cell size when hex view is on
 
 Mask selection:
   1 / f                 select floor-area mask
   2                     select dry-floor mask
   3 / w                 select wet-floor mask
   4 / o                 select obstruction mask
+
+Hex visualization:
+  Space                 toggle averaged-color hexagon view
+  1 / 2 / 3 / 4         show hexagons only for the selected mask layer
 
 Editing:
   r                     reset selected mask
@@ -96,6 +100,9 @@ class EditorState:
     selected: str = "floor"
     brush_mode: str = "draw"
     brush_size: int = 20
+    hex_enabled: bool = False
+    hex_cell_size: int = 40
+    mask_revision: int = 0
     is_painting: bool = False
     cursor: tuple[int, int] | None = None
     last_paint_point: tuple[int, int] | None = None
@@ -119,6 +126,9 @@ class FrameView:
     display_frame: np.ndarray
     base_overlay: np.ndarray | None = None
     overlay: np.ndarray | None = None
+    hex_overlay: np.ndarray | None = None
+    hex_mask: np.ndarray | None = None
+    hex_cache_key: tuple[int, str, int, int, int] | None = None
     suppress_trackbar_callback: bool = False
 
 
@@ -189,6 +199,9 @@ def set_frame_view_frame(view: FrameView, state: EditorState, frame: np.ndarray)
     view.display_frame = make_display_frame(frame, state)
     view.base_overlay = None
     view.overlay = None
+    view.hex_overlay = None
+    view.hex_mask = None
+    view.hex_cache_key = None
     state.render_dirty = True
 
 
@@ -203,6 +216,11 @@ def refresh_display_mask(state: EditorState, label: str) -> None:
     state.masks_dirty = True
     state.render_dirty = True
 
+
+def invalidate_masks(state: EditorState) -> None:
+    state.mask_revision += 1
+    state.masks_dirty = True
+    state.render_dirty = True
 
 
 def make_empty_mask(state: EditorState) -> np.ndarray:
@@ -341,8 +359,7 @@ def paint_at(state: EditorState, point: tuple[int, int]) -> None:
     apply_floor_condition_rules(state, stroke_mask, display_stroke_mask)
     state.last_paint_point = point
     state.dirty = True
-    state.masks_dirty = True
-    state.render_dirty = True
+    invalidate_masks(state)
 
 
 def begin_stroke(state: EditorState, point: tuple[int, int]) -> None:
@@ -377,8 +394,7 @@ def reset_selected_mask(state: EditorState) -> None:
         for label in CONDITION_LABELS:
             refresh_display_mask(state, label)
     state.dirty = True
-    state.masks_dirty = True
-    state.render_dirty = True
+    invalidate_masks(state)
     print(f"Reset '{state.selected}' mask.")
 
 
@@ -401,7 +417,7 @@ def undo(state: EditorState) -> None:
                 refresh_display_mask(state, item.label)
             restored_labels.append(f"{item.label}@frame{item.frame_index + 1}")
     state.dirty = True
-    state.render_dirty = True
+    invalidate_masks(state)
     print(f"Undid last change to {', '.join(restored_labels)} mask(s).")
 
 
@@ -413,7 +429,7 @@ def clip_to_floor(state: EditorState) -> None:
             frame_masks[label] = cv2.bitwise_and(frame_masks[label], floor)
     bind_condition_masks_to_frame(state, state.current_condition_frame)
     state.dirty = True
-    state.render_dirty = True
+    invalidate_masks(state)
     print("Clipped dry, wet, and obstruction masks on every annotated frame to the floor-area mask.")
 
 
@@ -490,6 +506,76 @@ def save_outputs(state: EditorState) -> None:
     print(f"Saved floor mask and {len(frame_outputs)} frame-specific annotation set(s) to: {state.out_dir.resolve()}")
 
 
+def hexagon_points(center_x: float, center_y: float, radius: float) -> np.ndarray:
+    points = []
+    for angle_degrees in range(0, 360, 60):
+        angle = np.deg2rad(angle_degrees)
+        points.append((center_x + radius * np.cos(angle), center_y + radius * np.sin(angle)))
+    return np.round(points).astype(np.int32)
+
+
+def iter_hexagons(width: int, height: int, radius: int):
+    hex_height = np.sqrt(3) * radius
+    horizontal_step = 1.5 * radius
+    col = 0
+    center_x = radius
+    while center_x < width + radius:
+        row_offset = (hex_height / 2) if col % 2 else 0
+        center_y = row_offset + radius
+        while center_y < height + radius:
+            yield hexagon_points(center_x, center_y, radius)
+            center_y += hex_height
+        col += 1
+        center_x = radius + col * horizontal_step
+
+
+def polygon_bounds(polygon: np.ndarray, width: int, height: int) -> tuple[int, int, int, int] | None:
+    x0 = max(0, int(np.min(polygon[:, 0])))
+    y0 = max(0, int(np.min(polygon[:, 1])))
+    x1 = min(width, int(np.max(polygon[:, 0])) + 1)
+    y1 = min(height, int(np.max(polygon[:, 1])) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return None
+    return x0, y0, x1, y1
+
+
+def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
+    cache_key = (state.frame_index, state.selected, state.hex_cell_size, state.mask_revision, id(view.frame))
+    if view.hex_overlay is not None and view.hex_cache_key == cache_key:
+        return view.hex_overlay
+
+    hex_overlay = np.zeros_like(view.display_frame)
+    hex_mask = np.zeros(view.display_frame.shape[:2], dtype=np.uint8)
+    source_mask = state.masks[state.selected]
+    radius = max(1, state.hex_cell_size)
+
+    for polygon in iter_hexagons(state.width, state.height, radius):
+        bounds = polygon_bounds(polygon, state.width, state.height)
+        if bounds is None:
+            continue
+        x0, y0, x1, y1 = bounds
+        local_polygon = polygon - np.array([x0, y0], dtype=np.int32)
+        cell_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+        cv2.fillPoly(cell_mask, [local_polygon], 255)
+
+        cell_pixels = cell_mask > 0
+        layer_pixels = cell_pixels & (source_mask[y0:y1, x0:x1] > 0)
+        if not np.any(layer_pixels):
+            continue
+
+        average_color = view.frame[y0:y1, x0:x1][cell_pixels].mean(axis=0)
+        display_polygon = np.round(polygon * state.scale).astype(np.int32)
+        color = tuple(int(channel) for channel in average_color)
+        cv2.fillPoly(hex_overlay, [display_polygon], color)
+        cv2.fillPoly(hex_mask, [display_polygon], 255)
+        cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
+
+    view.hex_overlay = hex_overlay
+    view.hex_mask = hex_mask
+    view.hex_cache_key = cache_key
+    return hex_overlay
+
+
 def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     if view.overlay is not None and not state.render_dirty:
         return view.overlay
@@ -510,6 +596,12 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         state.masks_dirty = False
 
     overlay = view.base_overlay.copy()
+    if state.hex_enabled:
+        hex_overlay = make_hex_overlay(state, view)
+        if view.hex_mask is not None:
+            hex_pixels = view.hex_mask > 0
+            overlay[hex_pixels] = hex_overlay[hex_pixels]
+
     if state.cursor is not None:
         cursor = display_point(state.cursor, state.scale)
         brush_radius = max(1, int(round(state.brush_size * state.scale)))
@@ -519,7 +611,7 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     status = (
         f"Frame {state.frame_index + 1}/{max(state.frame_count, 1)} | "
         f"mask: {state.selected} | mode: {state.brush_mode} | "
-        f"brush: {state.brush_size}px | h=help s=save q=quit"
+        f"brush: {state.brush_size}px | hex: {'on' if state.hex_enabled else 'off'} {state.hex_cell_size}px | h=help s=save q=quit"
     )
     cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 30), (0, 0, 0), -1)
     cv2.putText(overlay, status, (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
@@ -588,6 +680,18 @@ def adjust_brush_size(state: EditorState, delta: int) -> None:
     state.brush_size = min(max(state.brush_size + delta, 1), 500)
     state.render_dirty = True
     print(f"Brush size: {state.brush_size}px")
+
+
+def adjust_hex_cell_size(state: EditorState, delta: int) -> None:
+    state.hex_cell_size = min(max(state.hex_cell_size + delta, 5), 500)
+    state.render_dirty = True
+    print(f"Hex cell size: {state.hex_cell_size}px")
+
+
+def toggle_hex_view(state: EditorState) -> None:
+    state.hex_enabled = not state.hex_enabled
+    state.render_dirty = True
+    print(f"Hex view: {'on' if state.hex_enabled else 'off'}")
 
 
 def main() -> int:
@@ -667,10 +771,18 @@ def main() -> int:
             state.brush_mode = "erase"
             state.render_dirty = True
             print("Brush mode: erase")
+        elif key == ord(" "):
+            toggle_hex_view(state)
         elif key in (ord("+"), ord("=")):
-            adjust_brush_size(state, 5)
+            if state.hex_enabled:
+                adjust_hex_cell_size(state, 5)
+            else:
+                adjust_brush_size(state, 5)
         elif key in (ord("-"), ord("_")):
-            adjust_brush_size(state, -5)
+            if state.hex_enabled:
+                adjust_hex_cell_size(state, -5)
+            else:
+                adjust_brush_size(state, -5)
         elif key in (ord("1"), ord("f")):
             set_selected_mask(state, "floor")
         elif key == ord("2"):
