@@ -57,7 +57,7 @@ Mask selection:
 
 Hex visualization:
   Space                 toggle averaged-color hexagon view
-  Enter                 run dry-to-wet OKLab hex analysis (0=red, 100=green)
+  Enter                 run dry-to-wet OKLab hex analysis (0=red, 50=yellow, 100=green)
                         Hexes too far from dry-wet colour line show checkers
   1 / 2 / 3 / 4         show hexagons only for the selected mask layer
 
@@ -622,8 +622,14 @@ def bgr_to_oklab(bgr_color: np.ndarray) -> np.ndarray:
 
 
 def wetness_to_bgr(value: float) -> tuple[int, int, int]:
-    value = min(max(value, 0.0), 100.0) / 100.0
-    return (0, int(round(255 * value)), int(round(255 * (1.0 - value))))
+    normalized = min(max(value, 0.0), 100.0) / 100.0
+    if normalized <= 0.5:
+        green = int(round(255 * normalized * 2.0))
+        red = 255
+    else:
+        green = 255
+        red = int(round(255 * (1.0 - normalized) * 2.0))
+    return (0, green, red)
 
 
 def average_bgr_in_polygon(frame: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> np.ndarray | None:
