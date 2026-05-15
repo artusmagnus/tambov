@@ -141,6 +141,7 @@ class FrameView:
     hex_overlay: np.ndarray | None = None
     hex_mask: np.ndarray | None = None
     hex_cache_key: tuple[int, str, int, int, int, int] | None = None
+    analysis_average_wetness: float | None = None
     suppress_trackbar_callback: bool = False
 
 
@@ -244,6 +245,7 @@ def set_frame_view_frame(view: FrameView, state: EditorState, frame: np.ndarray)
     view.hex_overlay = None
     view.hex_mask = None
     view.hex_cache_key = None
+    view.analysis_average_wetness = None
     state.render_dirty = True
 
 
@@ -842,6 +844,7 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
 
     hex_overlay = np.zeros_like(view.display_frame)
     hex_mask = np.zeros(view.display_frame.shape[:2], dtype=np.uint8)
+    wetness_values: list[float] = []
     source_mask = analysis_visibility_mask(state) if state.analysis_enabled else state.masks[state.selected]
     radius = max(1, state.hex_cell_size)
 
@@ -872,6 +875,7 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
                 cv2.fillPoly(hex_mask, [display_polygon], 255)
                 cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
                 continue
+            wetness_values.append(wetness_value)
             color = wetness_to_bgr(wetness_value)
             if state.hex_cell_size * state.scale >= 18:
                 wetness_text = f"{wetness_value:.0f}"
@@ -896,7 +900,37 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     view.hex_overlay = hex_overlay
     view.hex_mask = hex_mask
     view.hex_cache_key = cache_key
+    view.analysis_average_wetness = float(np.mean(wetness_values)) if wetness_values else None
     return hex_overlay
+
+
+def draw_top_right_label(frame: np.ndarray, text: str, top: int = 8) -> None:
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.65
+    thickness = 2
+    padding = 6
+    text_size, baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    text_width, text_height = text_size
+    x0 = max(0, frame.shape[1] - text_width - padding * 2 - 8)
+    y0 = max(0, top)
+    x1 = min(frame.shape[1], x0 + text_width + padding * 2)
+    y1 = min(frame.shape[0], y0 + text_height + baseline + padding * 2)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.putText(
+        frame,
+        text,
+        (x0 + padding, y0 + padding + text_height),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def draw_analysis_average_wetness(frame: np.ndarray, view: FrameView, top: int = 8) -> None:
+    if view.analysis_average_wetness is not None:
+        draw_top_right_label(frame, f"Avg wetness: {view.analysis_average_wetness:.0f}", top)
 
 
 def make_analysis_video_frame(state: EditorState, frame: np.ndarray) -> np.ndarray:
@@ -907,6 +941,7 @@ def make_analysis_video_frame(state: EditorState, frame: np.ndarray) -> np.ndarr
         hex_pixels = view.hex_mask > 0
         blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
         output_frame[hex_pixels] = blended_hex[hex_pixels]
+    draw_analysis_average_wetness(output_frame, view)
     return output_frame
 
 
@@ -1007,6 +1042,8 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     )
     cv2.rectangle(overlay, (0, 0), (overlay.shape[1], 30), (0, 0, 0), -1)
     cv2.putText(overlay, status, (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+    if state.analysis_enabled:
+        draw_analysis_average_wetness(overlay, view, top=4)
     view.overlay = overlay
     state.render_dirty = False
     return overlay
