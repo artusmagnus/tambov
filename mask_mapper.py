@@ -709,9 +709,56 @@ def collect_hex_color_samples(
     return samples
 
 
+def find_nearest_model_by_state_color(
+    known_oklab: np.ndarray,
+    models: dict[int, HexWetnessModel],
+    known_label: str,
+) -> HexWetnessModel | None:
+    nearest_model: HexWetnessModel | None = None
+    nearest_distance = float("inf")
+    for model in models.values():
+        model_oklab = model.dry_oklab if known_label == "dry" else model.wet_oklab
+        distance = float(np.linalg.norm(known_oklab - model_oklab))
+        if distance < nearest_distance:
+            nearest_model = model
+            nearest_distance = distance
+    return nearest_model
+
+
+def infer_single_state_wetness_models(
+    samples: dict[int, dict[str, list[np.ndarray]]],
+    complete_models: dict[int, HexWetnessModel],
+) -> dict[int, HexWetnessModel]:
+    inferred_models: dict[int, HexWetnessModel] = {}
+    if not complete_models:
+        return inferred_models
+
+    for cell_index, cell_samples in samples.items():
+        has_dry = bool(cell_samples["dry"])
+        has_wet = bool(cell_samples["wet"])
+        if has_dry == has_wet:
+            continue
+
+        if has_dry:
+            dry_oklab = np.mean(cell_samples["dry"], axis=0)
+            nearest_model = find_nearest_model_by_state_color(dry_oklab, complete_models, "dry")
+            if nearest_model is not None:
+                wet_oklab = nearest_model.wet_oklab.copy()
+                if float(np.dot(wet_oklab - dry_oklab, wet_oklab - dry_oklab)) > 1e-12:
+                    inferred_models[cell_index] = HexWetnessModel(dry_oklab=dry_oklab, wet_oklab=wet_oklab)
+        else:
+            wet_oklab = np.mean(cell_samples["wet"], axis=0)
+            nearest_model = find_nearest_model_by_state_color(wet_oklab, complete_models, "wet")
+            if nearest_model is not None:
+                dry_oklab = nearest_model.dry_oklab.copy()
+                if float(np.dot(wet_oklab - dry_oklab, wet_oklab - dry_oklab)) > 1e-12:
+                    inferred_models[cell_index] = HexWetnessModel(dry_oklab=dry_oklab, wet_oklab=wet_oklab)
+    return inferred_models
+
+
 def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
     samples = collect_hex_color_samples(state, capture)
-    models: dict[int, HexWetnessModel] = {}
+    complete_models: dict[int, HexWetnessModel] = {}
     for cell_index, cell_samples in samples.items():
         if not cell_samples["dry"] or not cell_samples["wet"]:
             continue
@@ -719,7 +766,10 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
         wet_oklab = np.mean(cell_samples["wet"], axis=0)
         if float(np.dot(wet_oklab - dry_oklab, wet_oklab - dry_oklab)) <= 1e-12:
             continue
-        models[cell_index] = HexWetnessModel(dry_oklab=dry_oklab, wet_oklab=wet_oklab)
+        complete_models[cell_index] = HexWetnessModel(dry_oklab=dry_oklab, wet_oklab=wet_oklab)
+
+    inferred_models = infer_single_state_wetness_models(samples, complete_models)
+    models = {**complete_models, **inferred_models}
 
     state.wetness_models = models
     state.analysis_enabled = bool(models)
@@ -727,9 +777,13 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
     state.analysis_revision += 1
     state.render_dirty = True
     if models:
-        print(f"Wetness analysis ready for {len(models)} hex cell(s). Navigate frames to view floor wetness estimates.")
+        print(
+            f"Wetness analysis ready for {len(models)} hex cell(s) "
+            f"({len(complete_models)} directly paired, {len(inferred_models)} inferred from one-state samples). "
+            "Navigate frames to view floor wetness estimates."
+        )
     else:
-        print("Wetness analysis found no hex cells with both dry and wet examples.")
+        print("Wetness analysis found no usable hex cells; at least one hex needs both dry and wet examples.")
 
 
 def project_onto_wetness_axis(model: HexWetnessModel, bgr_color: np.ndarray) -> tuple[float, float]:
