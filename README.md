@@ -2,9 +2,16 @@
 
 Utilities for preparing a wet/dry floor detection workflow from video.
 
-## Interactive wet/dry floor mask mapper
+## Wet/dry floor mask workflow
 
-`mask_mapper.py` opens a video and lets you paint four masks with an adjustable brush:
+Use two separate commands:
+
+- `mask_annotator.py` is the interactive annotation editor.
+- `mask_mapper.py` is the non-interactive runner for `--process-video` and `--live-stream`.
+
+### Interactive annotation
+
+`mask_annotator.py` opens a video and lets you paint four masks with an adjustable brush:
 
 1. **floor** — the persistent full visible floor region that should be considered by the detector.
 2. **dry** — parts of the floor that are visibly dry in the selected frame only.
@@ -21,37 +28,37 @@ You can choose the reference frame with the horizontal slider before painting. F
 python -m pip install -r requirements.txt
 ```
 
-### Run
+### Annotate
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --out-dir mask_output
+python mask_annotator.py /path/to/video.mp4 --out-dir mask_output
 # The same source can also be supplied with aliases:
-python mask_mapper.py --video /path/to/video.mp4 --out-dir mask_output
-python mask_mapper.py --source /path/to/video.mp4 --out-dir mask_output
+python mask_annotator.py --video /path/to/video.mp4 --out-dir mask_output
+python mask_annotator.py --source /path/to/video.mp4 --out-dir mask_output
 ```
 
 For smoother editing on large videos, the tool automatically limits the display window to 1280 pixels wide while keeping saved masks at the original video resolution. You can also set the display scale or brush size manually:
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --scale 0.5 --brush-size 15 --out-dir mask_output
+python mask_annotator.py /path/to/video.mp4 --scale 0.5 --brush-size 15 --out-dir mask_output
 ```
 
 Adjust the OKLab analysis rejection threshold if moving objects or lighting changes are being accepted/rejected too aggressively. Analysis accumulates source frames into a temporal average over a 5-second window by default, sampling one frame per second inside that window, then runs the hex analysis on that averaged frame to reduce short-lived interference. Use `--analysis-time-window` to change the window, `0` for `--analysis-time-window` to disable temporal averaging, and `--analysis-sample-interval` to change how often frames are sampled into the average (`0` samples every frame):
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --analysis-max-distance 0.06 --analysis-time-window 3 --analysis-sample-interval 0.5 --out-dir mask_output
+python mask_annotator.py /path/to/video.mp4 --analysis-max-distance 0.06 --analysis-time-window 3 --analysis-sample-interval 0.5 --out-dir mask_output
 ```
 
 Load a previous annotation session by passing the folder that contains the saved mask images. The loader reconstructs annotations from PNG filenames, so it does not need a JSON metadata file:
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --load-dir mask_output --out-dir mask_output
+python mask_annotator.py /path/to/video.mp4 --load-dir mask_output --out-dir mask_output
 ```
 
 Disable automatic display downscaling if you need a full-resolution window:
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_output
+python mask_annotator.py /path/to/video.mp4 --max-display-width 0 --out-dir mask_output
 ```
 
 ### Process an entire video
@@ -115,7 +122,7 @@ Typical live workflow:
 
 ```bash
 # 1. Annotate a seekable calibration clip from the same camera.
-python mask_mapper.py /path/to/annotated_calibration_video.mp4 --out-dir mask_output
+python mask_annotator.py /path/to/annotated_calibration_video.mp4 --out-dir mask_output
 
 # 2. Apply those masks/model to the live camera stream.
 # --analysis-source is only needed for older mask folders without saved frame images.
@@ -132,7 +139,7 @@ python mask_mapper.py \
 | `source`, `--video`, `--source`, `--input`, `--stream` | Required | OpenCV source to read: video file path, camera index, RTSP/HTTP URL, or another source supported by the local OpenCV build. |
 | `--out-dir` | `mask_output` | Directory where saved mask PNGs are written. Batch mode also uses it for the default output video path. |
 | `--load-dir` | Not set | Reconstruct a prior annotation session by scanning this directory for saved mask PNGs. Required with `--process-video` and `--live-stream`. |
-| `--scale` | `1.0` | Interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `--process-video` and `--live-stream`, which render at full resolution. |
+| `--scale` | `1.0` | `mask_annotator.py` interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `mask_mapper.py` runner modes, which render at full resolution. |
 | `--alpha` | `0.45` | Opacity for the regular mask-color overlay, from `0.0` to `1.0`. |
 | `--analysis-max-distance` | `0.08` | Maximum OKLab perpendicular distance from a dry-to-wet colour line before an analysis hex is treated as an unrelated colour change and shown with the checker texture. |
 | `--analysis-time-window` | `5.0` | Seconds of video to accumulate into an averaged source frame before projecting hex wetness. Use `0` to disable temporal averaging. |
@@ -149,8 +156,8 @@ python mask_mapper.py \
 | `--rtsp-transport` | `auto` | RTSP transport passed to OpenCV/FFmpeg. `auto` tries `tcp`, `udp`, `udp_multicast`, `http`, then OpenCV's default across original/encoded/trailing-slash RTSP URL variants; set a specific transport if you know what the camera supports. |
 | `--analysis-source` | Saved frame images, then main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. Only needed when loading older mask folders that do not contain saved annotation frame images. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
-| `--brush-size` | `20` | Initial brush radius in original video pixels. |
-| `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
+| `--brush-size` | `20` | `mask_annotator.py` initial brush radius in original video pixels. |
+| `--max-display-width` | `1280` | `mask_annotator.py` automatically downscales the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
 
 ### Controls
 

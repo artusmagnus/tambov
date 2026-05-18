@@ -179,7 +179,7 @@ class FrameView:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Open a video and interactively map floor, dry-floor, wet-floor, and obstruction masks."
+        description="Run wet/dry floor analysis overlays from saved annotations."
     )
     parser.add_argument("source", nargs="?", help="Path, camera index, RTSP/HTTP URL, or other OpenCV video source.")
     parser.add_argument(
@@ -1984,6 +1984,85 @@ def toggle_hex_view(state: EditorState) -> None:
     print(f"Hex view: {'on' if state.hex_enabled else 'off'}")
 
 
+
+
+def run_annotation_editor(state: EditorState, capture: cv2.VideoCapture) -> int:
+    print(HELP_TEXT)
+    window_name = "wet/dry floor brush mask mapper"
+    first_frame = read_frame(capture, state.frame_index)
+    view = FrameView(frame=first_frame, display_frame=make_display_frame(first_frame, state))
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.createTrackbar("Frame", window_name, 0, max(state.frame_count - 1, 1), make_trackbar_callback(state, view, capture))
+    cv2.setMouseCallback(window_name, make_mouse_callback(state))
+
+    while True:
+        cv2.imshow(window_name, make_overlay(state, view))
+        key = cv2.waitKey(10) & 0xFF
+        if key == 255:
+            continue
+
+        if key in (ord("q"), 27):
+            if state.dirty:
+                print("Unsaved changes exist. Press 's' before quitting if you want to keep them.")
+            break
+        if key == ord("h"):
+            print(HELP_TEXT)
+        elif key == ord("d"):
+            state.brush_mode = "draw"
+            state.render_dirty = True
+            print("Brush mode: draw")
+        elif key == ord("e"):
+            state.brush_mode = "erase"
+            state.render_dirty = True
+            print("Brush mode: erase")
+        elif key in (10, 13):
+            run_wetness_analysis(state, capture)
+            update_analysis_sample_frame(state, view, capture)
+        elif key == ord(" "):
+            toggle_hex_view(state)
+        elif key in (ord("+"), ord("=")):
+            if state.hex_enabled:
+                adjust_hex_cell_size(state, 5)
+            else:
+                adjust_brush_size(state, 5)
+        elif key in (ord("-"), ord("_")):
+            if state.hex_enabled:
+                adjust_hex_cell_size(state, -5)
+            else:
+                adjust_brush_size(state, -5)
+        elif key in (ord("1"), ord("f")):
+            set_selected_mask(state, "floor")
+        elif key == ord("2"):
+            set_selected_mask(state, "dry")
+        elif key in (ord("3"), ord("w")):
+            set_selected_mask(state, "wet")
+        elif key in (ord("4"), ord("o")):
+            set_selected_mask(state, "obstruction")
+        elif key == ord("r"):
+            reset_selected_mask(state)
+        elif key == ord("u"):
+            undo(state)
+        elif key == ord("i"):
+            clip_to_floor(state)
+        elif key == ord("s"):
+            save_outputs(state, capture)
+        elif key in (ord("n"), 83):
+            set_frame(state, view, capture, window_name, state.frame_index + 1)
+        elif key in (ord("p"), 81):
+            set_frame(state, view, capture, window_name, state.frame_index - 1)
+        elif key == ord("]"):
+            set_frame(state, view, capture, window_name, state.frame_index + 30)
+        elif key == ord("["):
+            set_frame(state, view, capture, window_name, state.frame_index - 30)
+        elif key == ord("g"):
+            target = prompt_for_frame(state)
+            if target is not None:
+                set_frame(state, view, capture, window_name, target)
+
+    cv2.destroyAllWindows()
+    return 0
+
+
 def main() -> int:
     args = parse_args()
 
@@ -2035,6 +2114,11 @@ def main() -> int:
         raise ValueError("--stream-reconnect-delay must be 0 or greater.")
     if args.max_display_width < 0:
         raise ValueError("--max-display-width must be 0 or greater.")
+    if not args.process_video and not args.live_stream:
+        raise ValueError(
+            "mask_mapper.py is now the non-interactive runner. Pass --process-video or --live-stream, "
+            "or run mask_annotator.py to create/edit annotations."
+        )
 
     use_opencl = configure_opencl(args.use_opencl)
 
@@ -2108,82 +2192,11 @@ def main() -> int:
             capture.release()
             cv2.destroyAllWindows()
 
-    print(HELP_TEXT)
-    window_name = "wet/dry floor brush mask mapper"
-    first_frame = read_frame(capture, state.frame_index)
-    view = FrameView(frame=first_frame, display_frame=make_display_frame(first_frame, state))
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.createTrackbar("Frame", window_name, 0, max(frame_count - 1, 1), make_trackbar_callback(state, view, capture))
-    cv2.setMouseCallback(window_name, make_mouse_callback(state))
-
-    while True:
-        cv2.imshow(window_name, make_overlay(state, view))
-        key = cv2.waitKey(10) & 0xFF
-        if key == 255:
-            continue
-
-        if key in (ord("q"), 27):
-            if state.dirty:
-                print("Unsaved changes exist. Press 's' before quitting if you want to keep them.")
-            break
-        if key == ord("h"):
-            print(HELP_TEXT)
-        elif key == ord("d"):
-            state.brush_mode = "draw"
-            state.render_dirty = True
-            print("Brush mode: draw")
-        elif key == ord("e"):
-            state.brush_mode = "erase"
-            state.render_dirty = True
-            print("Brush mode: erase")
-        elif key in (10, 13):
-            run_wetness_analysis(state, capture)
-            update_analysis_sample_frame(state, view, capture)
-        elif key == ord(" "):
-            toggle_hex_view(state)
-        elif key in (ord("+"), ord("=")):
-            if state.hex_enabled:
-                adjust_hex_cell_size(state, 5)
-            else:
-                adjust_brush_size(state, 5)
-        elif key in (ord("-"), ord("_")):
-            if state.hex_enabled:
-                adjust_hex_cell_size(state, -5)
-            else:
-                adjust_brush_size(state, -5)
-        elif key in (ord("1"), ord("f")):
-            set_selected_mask(state, "floor")
-        elif key == ord("2"):
-            set_selected_mask(state, "dry")
-        elif key in (ord("3"), ord("w")):
-            set_selected_mask(state, "wet")
-        elif key in (ord("4"), ord("o")):
-            set_selected_mask(state, "obstruction")
-        elif key == ord("r"):
-            reset_selected_mask(state)
-        elif key == ord("u"):
-            undo(state)
-        elif key == ord("i"):
-            clip_to_floor(state)
-        elif key == ord("s"):
-            save_outputs(state, capture)
-        elif key in (ord("n"), 83):
-            set_frame(state, view, capture, window_name, state.frame_index + 1)
-        elif key in (ord("p"), 81):
-            set_frame(state, view, capture, window_name, state.frame_index - 1)
-        elif key == ord("]"):
-            set_frame(state, view, capture, window_name, state.frame_index + 30)
-        elif key == ord("["):
-            set_frame(state, view, capture, window_name, state.frame_index - 30)
-        elif key == ord("g"):
-            target = prompt_for_frame(state)
-            if target is not None:
-                set_frame(state, view, capture, window_name, target)
-
     capture.release()
-    cv2.destroyAllWindows()
-    return 0
-
+    raise ValueError(
+        "mask_mapper.py is now the non-interactive runner. Use --process-video or --live-stream here, "
+        "or run mask_annotator.py to create/edit annotations."
+    )
 
 if __name__ == "__main__":
     raise SystemExit(main())
