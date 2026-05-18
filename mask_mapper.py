@@ -129,6 +129,8 @@ class EditorState:
     wetness_models: dict[int, HexWetnessModel] = field(default_factory=dict)
     hex_cells_cache_key: tuple[int, int, int] | None = None
     hex_cells: list[HexCell] = field(default_factory=list)
+    floor_hex_cells_cache_key: tuple[int, int, int, int, int] | None = None
+    floor_hex_cells: list[HexCell] = field(default_factory=list)
     is_painting: bool = False
     cursor: tuple[int, int] | None = None
     last_paint_point: tuple[int, int] | None = None
@@ -901,7 +903,32 @@ def get_hex_cells(state: EditorState) -> list[HexCell]:
     if state.hex_cells_cache_key != cache_key:
         state.hex_cells = build_hex_cells(state.width, state.height, radius)
         state.hex_cells_cache_key = cache_key
+        state.floor_hex_cells_cache_key = None
     return state.hex_cells
+
+
+def get_floor_hex_cells(state: EditorState) -> list[HexCell]:
+    radius = max(1, state.hex_cell_size)
+    cache_key = (state.width, state.height, radius, state.mask_revision, id(state.masks["floor"]))
+    if state.floor_hex_cells_cache_key != cache_key:
+        state.floor_hex_cells = [
+            cell for cell in get_hex_cells(state) if cell_overlaps_mask(state.masks["floor"], cell)
+        ]
+        state.floor_hex_cells_cache_key = cache_key
+    return state.floor_hex_cells
+
+
+def iter_visible_hex_cells(state: EditorState) -> list[HexCell]:
+    if state.analysis_enabled:
+        floor_cells = get_floor_hex_cells(state)
+        obstruction_mask = state.masks["obstruction"]
+        if not np.any(obstruction_mask > 0):
+            return floor_cells
+        return [cell for cell in floor_cells if not cell_overlaps_mask(obstruction_mask, cell)]
+    if state.selected == "floor":
+        return get_floor_hex_cells(state)
+    selected_mask = state.masks[state.selected]
+    return [cell for cell in get_hex_cells(state) if cell_overlaps_mask(selected_mask, cell)]
 
 
 def collect_hex_color_samples(
@@ -1022,12 +1049,6 @@ def estimate_wetness_value(model: HexWetnessModel, bgr_color: np.ndarray) -> flo
     return wetness
 
 
-def analysis_visibility_mask(state: EditorState) -> np.ndarray:
-    visibility_mask = state.masks["floor"].copy()
-    visibility_mask[state.masks["obstruction"] > 0] = 0
-    return visibility_mask
-
-
 def fill_missing_hex_texture(hex_overlay: np.ndarray, display_polygon: np.ndarray, square_size: int) -> None:
     bounds = polygon_bounds(display_polygon, hex_overlay.shape[1], hex_overlay.shape[0])
     if bounds is None:
@@ -1061,12 +1082,8 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     hex_overlay = np.zeros_like(view.display_frame)
     hex_mask = np.zeros(view.display_frame.shape[:2], dtype=np.uint8)
     wetness_values: list[float] = []
-    source_mask = analysis_visibility_mask(state) if state.analysis_enabled else state.masks[state.selected]
 
-    for cell in get_hex_cells(state):
-        if not cell_overlaps_mask(source_mask, cell):
-            continue
-
+    for cell in iter_visible_hex_cells(state):
         average_color = average_bgr_in_cell(sample_frame, cell)
         if average_color is None:
             continue
