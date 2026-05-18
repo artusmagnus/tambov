@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import re
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -105,6 +107,8 @@ class HexCell:
 
 @dataclass
 class EditorState:
+    source: str
+    source_stem: str
     video_path: Path
     out_dir: Path
     frame_count: int
@@ -117,6 +121,9 @@ class EditorState:
     analysis_time_window: float
     analysis_sample_interval: float
     live_analysis_interval: float
+    live_target_fps: float | None
+    stream_reconnect_delay: float
+    is_live_source: bool
     show_hex_values: bool
     average_wetness_only: bool
     use_opencl: bool
@@ -171,7 +178,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Open a video and interactively map floor, dry-floor, wet-floor, and obstruction masks."
     )
-    parser.add_argument("video", type=Path, help="Path to the input video file.")
+    parser.add_argument("source", nargs="?", help="Path, camera index, RTSP/HTTP URL, or other OpenCV video source.")
+    parser.add_argument(
+        "--video",
+        "--source",
+        "--input",
+        "--stream",
+        dest="source_option",
+        help="Path, camera index, RTSP/HTTP URL, or other OpenCV video source.",
+    )
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -269,6 +284,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fps",
+        type=float,
+        help=(
+            "Target processing/display FPS for --live-stream. If lower than source FPS, "
+            "intermediate frames are skipped with VideoCapture.grab()."
+        ),
+    )
+    parser.add_argument(
+        "--stream-reconnect-delay",
+        type=float,
+        default=2.0,
+        help="Seconds to wait before reopening a failed live source read.",
+    )
+    parser.add_argument(
+        "--analysis-source",
+        help=(
+            "Optional seekable video source used to build the dry-to-wet model before "
+            "--live-stream reads from the live source. Defaults to the main source."
+        ),
+    )
+    parser.add_argument(
         "--output-video",
         type=Path,
         help="Output video path for --process-video. Defaults to <out-dir>/<video>_hex_overlay.mp4.",
@@ -288,13 +324,68 @@ def parse_args() -> argparse.Namespace:
             "Use 0 to disable automatic downscaling."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.source and args.source_option and args.source != args.source_option:
+        parser.error("Provide the input source either positionally or with --video/--source/--input/--stream, not both.")
+    args.source = args.source_option or args.source
+    if not args.source:
+        parser.error("an input source is required (positional source or --video/--source/--input/--stream).")
+    return args
 
 
 def clamp_frame(index: int, frame_count: int) -> int:
     if frame_count <= 0:
         return 0
     return min(max(index, 0), frame_count - 1)
+
+
+def source_capture_value(source: str) -> str | int:
+    stripped_source = source.strip()
+    if stripped_source.isdecimal():
+        return int(stripped_source)
+    return source
+
+
+def open_capture(source: str) -> cv2.VideoCapture:
+    capture = cv2.VideoCapture(source_capture_value(source))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open source: {source}")
+    return capture
+
+
+def source_name_stem(source: str) -> str:
+    parsed = urlparse(source)
+    if parsed.scheme and parsed.path:
+        candidate = Path(parsed.path).stem
+    else:
+        candidate = Path(source).stem
+    candidate = re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate).strip("._")
+    return candidate or "source"
+
+
+def is_probably_live_source(source: str, frame_count: int) -> bool:
+    parsed = urlparse(source)
+    if parsed.scheme.lower() in {"rtsp", "rtmp", "http", "https", "udp", "tcp"}:
+        return True
+    if source.strip().isdecimal():
+        return True
+    return frame_count <= 0
+
+
+def source_fps_with_fallback(capture: cv2.VideoCapture) -> float:
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    return fps if fps > 0 else 30.0
+
+
+def source_frame_count(capture: cv2.VideoCapture) -> int:
+    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    return frame_count if frame_count > 0 else 0
+
+
+def live_frame_stride(state: EditorState) -> int:
+    if state.live_target_fps is None:
+        return 1
+    return max(1, int(round(state.fps / state.live_target_fps)))
 
 
 def configure_opencl(requested: bool) -> bool:
@@ -785,7 +876,7 @@ def has_condition_labels(frame_masks: dict[str, np.ndarray]) -> bool:
 
 def save_outputs(state: EditorState) -> None:
     state.out_dir.mkdir(parents=True, exist_ok=True)
-    stem = state.video_path.stem
+    stem = state.source_stem
 
     floor_path = state.out_dir / f"{stem}_floor_mask.png"
     cv2.imwrite(str(floor_path), state.masks["floor"])
@@ -861,13 +952,15 @@ def load_outputs(state: EditorState, load_dir: Path) -> None:
     if not load_dir.is_dir():
         raise RuntimeError(f"Mask load path must be a directory: {load_dir}")
 
-    video_stem = state.video_path.stem
-    state.masks["floor"] = load_binary_mask(find_floor_mask(load_dir, video_stem), state.width, state.height)
+    video_stem = state.source_stem
+    floor_mask_path = find_floor_mask(load_dir, video_stem)
+    annotation_stem = floor_mask_path.name.removesuffix("_floor_mask.png")
+    state.masks["floor"] = load_binary_mask(floor_mask_path, state.width, state.height)
     state.condition_masks_by_frame.clear()
 
     loaded_frames: set[int] = set()
     for mask_path in sorted(load_dir.glob("*_frame_*_mask.png")):
-        parsed = parse_condition_mask_filename(mask_path, video_stem)
+        parsed = parse_condition_mask_filename(mask_path, annotation_stem)
         if parsed is None:
             continue
 
@@ -1309,7 +1402,7 @@ def render_analysis_overlay_from_cache(
 
 
 def default_output_video_path(state: EditorState) -> Path:
-    return state.out_dir / f"{state.video_path.stem}_hex_overlay.mp4"
+    return state.out_dir / f"{state.source_stem}_hex_overlay.mp4"
 
 
 def process_video_with_analysis_overlay(
@@ -1337,10 +1430,11 @@ def process_video_with_analysis_overlay(
     sample_capture: cv2.VideoCapture | None = None
     temporal_averager: TemporalFrameAverager | None = None
     if analysis_window_radius_frames(state) > 0:
-        sample_capture = cv2.VideoCapture(str(state.video_path))
-        if not sample_capture.isOpened():
+        try:
+            sample_capture = open_capture(state.source)
+        except RuntimeError:
             writer.release()
-            raise RuntimeError(f"Could not open video for temporal analysis sampling: {state.video_path}")
+            raise
         temporal_averager = TemporalFrameAverager(state, sample_capture)
 
     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -1384,27 +1478,35 @@ def process_video_with_analysis_overlay(
 def live_analysis_interval_frames(state: EditorState) -> int:
     if state.live_analysis_interval <= 0:
         return 1
-    fps = state.fps if state.fps > 0 else 30.0
-    return max(1, int(round(state.live_analysis_interval * fps)))
+    source_fps = state.fps if state.fps > 0 else 30.0
+    effective_fps = min(source_fps, state.live_target_fps) if state.live_target_fps is not None else source_fps
+    return max(1, int(round(state.live_analysis_interval * effective_fps)))
 
 
-def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.VideoCapture) -> int:
+def play_live_stream_with_analysis_overlay(
+    state: EditorState,
+    capture: cv2.VideoCapture,
+    analysis_capture: cv2.VideoCapture,
+) -> int:
     if not state.condition_masks_by_frame:
         raise RuntimeError("No mask annotations are loaded; pass --load-dir with saved mask PNGs.")
 
     state.scale = 1.0
     state.hex_enabled = True
     state.analysis_enabled = False
-    run_wetness_analysis(state, capture)
+    run_wetness_analysis(state, analysis_capture)
     if not state.analysis_enabled:
         raise RuntimeError("Cannot play live stream because wetness analysis found no dry/wet hex models.")
 
-    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    if not state.is_live_source:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
     stream_window_name = "wet/dry floor live analysis"
     cv2.namedWindow(stream_window_name, cv2.WINDOW_NORMAL)
     fps = state.fps if state.fps > 0 else 30.0
-    frame_delay_ms = max(1, int(round(1000.0 / fps)))
+    display_fps = min(fps, state.live_target_fps) if state.live_target_fps is not None else fps
+    frame_delay_ms = max(1, int(round(1000.0 / display_fps)))
     analysis_interval_frames = live_analysis_interval_frames(state)
+    process_every_n = live_frame_stride(state)
     live_averager = LiveFrameAverager(state)
     empty_condition_masks = make_empty_condition_masks(state)
     cached_hex_overlay: np.ndarray | None = None
@@ -1413,9 +1515,29 @@ def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.Vide
     processed_frames = 0
 
     while True:
-        ok, frame = capture.read()
+        read_failed = False
+        for _ in range(process_every_n - 1):
+            if not capture.grab():
+                read_failed = True
+                break
+
+        ok, frame = (False, None) if read_failed else capture.read()
         if not ok or frame is None:
-            break
+            if not state.is_live_source:
+                break
+            print(f"[stream] read failed; reconnecting to {state.source!r} in {state.stream_reconnect_delay:.1f}s...")
+            capture.release()
+            time.sleep(state.stream_reconnect_delay)
+            try:
+                capture = open_capture(state.source)
+            except RuntimeError as error:
+                print(f"[stream] reconnect failed: {error}")
+                time.sleep(state.stream_reconnect_delay)
+            live_averager = LiveFrameAverager(state)
+            cached_hex_overlay = None
+            cached_hex_mask = None
+            cached_average_wetness = None
+            continue
 
         state.frame_index = processed_frames
         frame_masks = state.condition_masks_by_frame.get(processed_frames, empty_condition_masks)
@@ -1441,6 +1563,7 @@ def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.Vide
 
         processed_frames += 1
 
+    capture.release()
     cv2.destroyWindow(stream_window_name)
     print(f"Played {processed_frames} live-stream frame(s).")
     return 0
@@ -1603,19 +1726,28 @@ def main() -> int:
         raise ValueError("--analysis-sample-interval must be 0 or greater.")
     if args.live_analysis_interval < 0:
         raise ValueError("--live-analysis-interval must be 0 or greater.")
+    if args.fps is not None and args.fps <= 0:
+        raise ValueError("--fps must be greater than 0.")
+    if args.stream_reconnect_delay < 0:
+        raise ValueError("--stream-reconnect-delay must be 0 or greater.")
     if args.max_display_width < 0:
         raise ValueError("--max-display-width must be 0 or greater.")
 
     use_opencl = configure_opencl(args.use_opencl)
 
-    capture = cv2.VideoCapture(str(args.video))
-    if not capture.isOpened():
-        raise RuntimeError(f"Could not open video: {args.video}")
+    source = args.source
+    mask_stem_source = args.analysis_source if args.live_stream and args.analysis_source else source
+    source_stem = source_name_stem(mask_stem_source)
+    capture = open_capture(source)
 
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    frame_count = source_frame_count(capture)
+    fps = source_fps_with_fallback(capture)
+    is_live_source = is_probably_live_source(source, frame_count)
+    if width <= 0 or height <= 0:
+        capture.release()
+        raise RuntimeError(f"Could not determine frame size for source: {source}")
 
     if args.process_video or args.live_stream:
         args.scale = 1.0
@@ -1624,7 +1756,9 @@ def main() -> int:
         print(f"Display scale set to {args.scale:.3f} for smoother editing.")
 
     state = EditorState(
-        video_path=args.video,
+        source=source,
+        source_stem=source_stem,
+        video_path=Path(source),
         out_dir=args.out_dir,
         frame_count=frame_count,
         width=width,
@@ -1636,6 +1770,9 @@ def main() -> int:
         analysis_time_window=args.analysis_time_window,
         analysis_sample_interval=args.analysis_sample_interval,
         live_analysis_interval=args.live_analysis_interval,
+        live_target_fps=args.fps,
+        stream_reconnect_delay=args.stream_reconnect_delay,
+        is_live_source=is_live_source,
         show_hex_values=args.show_hex_values,
         average_wetness_only=args.average_wetness_only,
         use_opencl=use_opencl,
@@ -1658,9 +1795,12 @@ def main() -> int:
             capture.release()
 
     if args.live_stream:
+        analysis_source = args.analysis_source or source
+        analysis_capture = open_capture(analysis_source)
         try:
-            return play_live_stream_with_analysis_overlay(state, capture)
+            return play_live_stream_with_analysis_overlay(state, capture, analysis_capture)
         finally:
+            analysis_capture.release()
             capture.release()
             cv2.destroyAllWindows()
 

@@ -25,6 +25,9 @@ python -m pip install -r requirements.txt
 
 ```bash
 python mask_mapper.py /path/to/video.mp4 --out-dir mask_output
+# The same source can also be supplied with aliases:
+python mask_mapper.py --video /path/to/video.mp4 --out-dir mask_output
+python mask_mapper.py --source /path/to/video.mp4 --out-dir mask_output
 ```
 
 For smoother editing on large videos, the tool automatically limits the display window to 1280 pixels wide while keeping saved masks at the original video resolution. You can also set the display scale or brush size manually:
@@ -68,19 +71,22 @@ python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output 
 
 ### Play as a live stream
 
-To review the same analysis overlay without writing a file, play the input video like a live stream. The stream uses the saved masks, builds the dry-to-wet model once, displays frames at the source FPS, applies temporal averaging only over frames that have already arrived, and recalculates the displayed analysis overlay once per second by default:
+To review the same analysis overlay without writing a file, play any OpenCV-supported source like a live stream. The source can be a video file, camera index, RTSP URL, HTTP URL, or anything else supported by the OpenCV/FFmpeg build. The stream uses the saved masks, builds the dry-to-wet model once, displays frames at the source FPS (falling back to 30 FPS when OpenCV cannot report it), applies temporal averaging only over frames that have already arrived, and recalculates the displayed analysis overlay once per second by default:
 
 ```bash
 python mask_mapper.py /path/to/video.mp4 --live-stream --load-dir mask_output
+python mask_mapper.py --stream rtsp://192.168.1.52/axis-media/media.amp --live-stream --load-dir mask_output --analysis-source /path/to/annotated_calibration_video.mp4
 ```
 
-Use `--live-analysis-interval` to control how often the live overlay is recalculated; for example, `0.5` updates twice per second, and `0` updates on every frame. Add `--average-wetness-only` to hide the hex/checker overlay and display only the average wetness label. Press `q` or Esc to stop the live stream window.
+Use `--live-analysis-interval` to control how often the live overlay is recalculated; for example, `0.5` updates twice per second, and `0` updates on every frame. Add `--fps 10` to process roughly every third frame from a 30 FPS source using `VideoCapture.grab()` to skip intermediate frames. For RTSP/HTTP/camera sources, failed reads trigger reconnect attempts every `--stream-reconnect-delay` seconds. Add `--average-wetness-only` to hide the hex/checker overlay and display only the average wetness label. Press `q` or Esc to stop the live stream window.
+
+For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
 
 ### Command-line flags
 
 | Argument | Default | Description |
 | --- | --- | --- |
-| `video` | Required | Path to the input video file. |
+| `source`, `--video`, `--source`, `--input`, `--stream` | Required | OpenCV source to read: video file path, camera index, RTSP/HTTP URL, or another source supported by the local OpenCV build. |
 | `--out-dir` | `mask_output` | Directory where saved mask PNGs are written. Batch mode also uses it for the default output video path. |
 | `--load-dir` | Not set | Reconstruct a prior annotation session by scanning this directory for saved mask PNGs. Required with `--process-video` and `--live-stream`. |
 | `--scale` | `1.0` | Interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `--process-video` and `--live-stream`, which render at full resolution. |
@@ -95,6 +101,9 @@ Use `--live-analysis-interval` to control how often the live overlay is recalcul
 | `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. Cannot be combined with `--live-stream`. |
 | `--live-stream` | Off | Play the input video in an OpenCV window with the analysis hex overlay at the source FPS. Requires `--load-dir` and cannot be combined with `--process-video`. |
 | `--live-analysis-interval` | `1.0` | Seconds between live-stream analysis overlay recalculations. Use `0` to recalculate on every frame. |
+| `--fps` | Source FPS | Target processing/display FPS for `--live-stream`; lower values skip source frames with `VideoCapture.grab()`. |
+| `--stream-reconnect-delay` | `2.0` | Seconds to wait before reopening a failed live source read. Used for RTSP/HTTP/camera sources. |
+| `--analysis-source` | Main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
 | `--brush-size` | `20` | Initial brush radius in original video pixels. |
 | `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
