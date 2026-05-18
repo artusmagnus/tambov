@@ -393,11 +393,33 @@ def rtsp_url_with_encoded_credentials(source: str) -> str | None:
     return encoded_source if encoded_source != source else None
 
 
+def rtsp_url_with_trailing_slash(source: str) -> str | None:
+    if not is_rtsp_source(source):
+        return None
+    parsed = urlsplit(source)
+    if parsed.path.endswith("/"):
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, f"{parsed.path}/", parsed.query, parsed.fragment))
+
+
+def add_unique_source_attempt(attempts: list[tuple[str, str]], source: str | None, label: str) -> None:
+    if source is None:
+        return
+    if any(existing_source == source for existing_source, _label in attempts):
+        return
+    attempts.append((source, label))
+
+
 def rtsp_source_attempts(source: str) -> tuple[tuple[str, str], ...]:
     encoded_source = rtsp_url_with_encoded_credentials(source)
-    attempts = [(source, "original URL")]
-    if encoded_source is not None:
-        attempts.append((encoded_source, "URL-encoded credentials"))
+    slash_source = rtsp_url_with_trailing_slash(source)
+    encoded_slash_source = rtsp_url_with_trailing_slash(encoded_source) if encoded_source is not None else None
+
+    attempts: list[tuple[str, str]] = []
+    add_unique_source_attempt(attempts, source, "original URL")
+    add_unique_source_attempt(attempts, slash_source, "original URL with trailing slash")
+    add_unique_source_attempt(attempts, encoded_source, "URL-encoded credentials")
+    add_unique_source_attempt(attempts, encoded_slash_source, "URL-encoded credentials with trailing slash")
     return tuple(attempts)
 
 
@@ -430,6 +452,12 @@ def ffmpeg_capture_options_with_rtsp_transport(source: str, transport: str) -> s
     return "|".join(options)
 
 
+def capture_backend(source: str) -> int | None:
+    if is_rtsp_source(source):
+        return getattr(cv2, "CAP_FFMPEG", None)
+    return None
+
+
 def capture_with_ffmpeg_options(source: str, rtsp_transport: str) -> cv2.VideoCapture:
     ffmpeg_options = ffmpeg_capture_options_with_rtsp_transport(source, rtsp_transport)
     previous_ffmpeg_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
@@ -437,7 +465,10 @@ def capture_with_ffmpeg_options(source: str, rtsp_transport: str) -> cv2.VideoCa
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
 
     try:
-        return cv2.VideoCapture(source_capture_value(source))
+        backend = capture_backend(source)
+        if backend is None:
+            return cv2.VideoCapture(source_capture_value(source))
+        return cv2.VideoCapture(source_capture_value(source), backend)
     finally:
         if ffmpeg_options is not None:
             if previous_ffmpeg_options is None:
@@ -476,8 +507,8 @@ def open_capture(source: str, rtsp_transport: str = "auto") -> cv2.VideoCapture:
         hint = (
             f" (tried: {', '.join(attempted_openings)}; "
             "if SETUP still fails, verify the RTSP URL, credentials, channel path, "
-            "and that VLC/ffplay can open the stream; if the password contains special "
-            "characters, also try percent-encoding them, e.g. ! as %21)"
+            "and that VLC/ffplay can open the stream; RTSP attempts are forced through "
+            "OpenCV's FFmpeg backend to avoid image-sequence fallback warnings)"
         )
     raise RuntimeError(f"Could not open source: {safe_source}{hint}")
 
