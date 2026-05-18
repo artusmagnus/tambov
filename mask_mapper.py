@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -256,8 +257,12 @@ def read_temporal_average_frame(
     if radius <= 0:
         return read_frame(capture, frame_index)
 
-    start_index = clamp_frame(frame_index - radius, state.frame_count)
-    end_index = clamp_frame(frame_index + radius, state.frame_count)
+    if state.frame_count > 0:
+        start_index = clamp_frame(frame_index - radius, state.frame_count)
+        end_index = clamp_frame(frame_index + radius, state.frame_count)
+    else:
+        start_index = max(0, frame_index - radius)
+        end_index = frame_index + radius
     accumulator = np.zeros((state.height, state.width, 3), dtype=np.float64)
     frame_total = 0
     for sample_index in range(start_index, end_index + 1):
@@ -267,6 +272,51 @@ def read_temporal_average_frame(
     if frame_total == 0:
         return read_frame(capture, frame_index)
     return np.clip(accumulator / frame_total, 0, 255).astype(np.uint8)
+
+
+class TemporalFrameAverager:
+    def __init__(self, state: EditorState, capture: cv2.VideoCapture) -> None:
+        self.state = state
+        self.capture = capture
+        self.radius = analysis_window_radius_frames(state)
+        self.next_frame_index = 0
+        self.frames: deque[tuple[int, np.ndarray]] = deque()
+        self.accumulator: np.ndarray | None = None
+        self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    def _append_frame(self, frame_index: int, frame: np.ndarray) -> None:
+        if self.accumulator is None:
+            self.accumulator = np.zeros_like(frame, dtype=np.float32)
+        self.accumulator += frame.astype(np.float32)
+        self.frames.append((frame_index, frame))
+
+    def _drop_before(self, start_index: int) -> None:
+        while self.frames and self.frames[0][0] < start_index:
+            _frame_index, frame = self.frames.popleft()
+            if self.accumulator is not None:
+                self.accumulator -= frame.astype(np.float32)
+
+    def average_for_frame(self, frame_index: int, fallback_frame: np.ndarray) -> np.ndarray:
+        if self.radius <= 0:
+            return fallback_frame
+
+        if self.state.frame_count > 0:
+            start_index = clamp_frame(frame_index - self.radius, self.state.frame_count)
+            end_index = clamp_frame(frame_index + self.radius, self.state.frame_count)
+        else:
+            start_index = max(0, frame_index - self.radius)
+            end_index = frame_index + self.radius
+        while self.next_frame_index <= end_index:
+            ok, frame = self.capture.read()
+            if not ok or frame is None:
+                break
+            self._append_frame(self.next_frame_index, frame)
+            self.next_frame_index += 1
+
+        self._drop_before(start_index)
+        if self.accumulator is None or not self.frames:
+            return fallback_frame
+        return np.clip(self.accumulator / len(self.frames), 0, 255).astype(np.uint8)
 
 
 def update_analysis_sample_frame(
@@ -1032,10 +1082,14 @@ def process_video_with_analysis_overlay(
     if not writer.isOpened():
         raise RuntimeError(f"Could not open output video for writing: {output_path}")
 
-    sample_capture = cv2.VideoCapture(str(state.video_path))
-    if not sample_capture.isOpened():
-        writer.release()
-        raise RuntimeError(f"Could not open video for temporal analysis sampling: {state.video_path}")
+    sample_capture: cv2.VideoCapture | None = None
+    temporal_averager: TemporalFrameAverager | None = None
+    if analysis_window_radius_frames(state) > 0:
+        sample_capture = cv2.VideoCapture(str(state.video_path))
+        if not sample_capture.isOpened():
+            writer.release()
+            raise RuntimeError(f"Could not open video for temporal analysis sampling: {state.video_path}")
+        temporal_averager = TemporalFrameAverager(state, sample_capture)
 
     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
     processed_frames = 0
@@ -1052,7 +1106,11 @@ def process_video_with_analysis_overlay(
             state.current_condition_frame = processed_frames
             for label in CONDITION_LABELS:
                 state.masks[label] = frame_masks[label]
-            analysis_sample_frame = read_temporal_average_frame(sample_capture, state, processed_frames)
+            analysis_sample_frame = (
+                temporal_averager.average_for_frame(processed_frames, frame)
+                if temporal_averager is not None
+                else frame
+            )
             output_frame = make_analysis_video_frame(state, frame, analysis_sample_frame)
             writer.write(output_frame)
             processed_frames += 1
@@ -1063,7 +1121,8 @@ def process_video_with_analysis_overlay(
                 else:
                     print(f"Processed {processed_frames} frames...")
     finally:
-        sample_capture.release()
+        if sample_capture is not None:
+            sample_capture.release()
         writer.release()
 
     print(f"Wrote analysis hex overlay video with {processed_frames} frame(s) to: {output_path.resolve()}")
