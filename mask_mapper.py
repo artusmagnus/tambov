@@ -118,6 +118,7 @@ class EditorState:
     analysis_sample_interval: float
     live_analysis_interval: float
     show_hex_values: bool
+    average_wetness_only: bool
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"
@@ -230,6 +231,14 @@ def parse_args() -> argparse.Namespace:
         "--show-hex-values",
         action="store_true",
         help="Draw numeric wetness values inside analysis hexes. Disabled by default for faster rendering.",
+    )
+    parser.add_argument(
+        "--average-wetness-only",
+        action="store_true",
+        help=(
+            "In analysis rendering, hide the hex/checker overlay and draw only the calculated "
+            "average wetness label over the source frame."
+        ),
     )
     parser.add_argument(
         "--process-video",
@@ -1191,7 +1200,7 @@ def make_analysis_video_frame(
     view = FrameView(frame=frame, display_frame=frame.copy(), analysis_sample_frame=analysis_sample_frame)
     hex_overlay = make_hex_overlay(state, view)
     output_frame = frame.copy()
-    if view.hex_mask is not None:
+    if not state.average_wetness_only and view.hex_mask is not None:
         hex_pixels = view.hex_mask > 0
         blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
         output_frame[hex_pixels] = blended_hex[hex_pixels]
@@ -1200,13 +1209,14 @@ def make_analysis_video_frame(
 
 
 def render_analysis_overlay_from_cache(
+    state: EditorState,
     frame: np.ndarray,
     hex_overlay: np.ndarray | None,
     hex_mask: np.ndarray | None,
     average_wetness: float | None,
 ) -> np.ndarray:
     output_frame = frame.copy()
-    if hex_overlay is not None and hex_mask is not None:
+    if not state.average_wetness_only and hex_overlay is not None and hex_mask is not None:
         hex_pixels = hex_mask > 0
         blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
         output_frame[hex_pixels] = blended_hex[hex_pixels]
@@ -1339,7 +1349,7 @@ def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.Vide
             cached_average_wetness = view.analysis_average_wetness
 
         output_frame = render_analysis_overlay_from_cache(
-            frame, cached_hex_overlay, cached_hex_mask, cached_average_wetness
+            state, frame, cached_hex_overlay, cached_hex_mask, cached_average_wetness
         )
         cv2.imshow(stream_window_name, output_frame)
         key = cv2.waitKey(frame_delay_ms) & 0xFF
@@ -1375,7 +1385,7 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     overlay = display_frame.copy() if state.hex_enabled else view.base_overlay.copy()
     if state.hex_enabled:
         hex_overlay = make_hex_overlay(state, view)
-        if view.hex_mask is not None:
+        if not state.average_wetness_only and view.hex_mask is not None:
             hex_pixels = view.hex_mask > 0
             blended_hex = cv2.addWeighted(hex_overlay, 0.2, display_frame, 0.8, 0)
             overlay[hex_pixels] = blended_hex[hex_pixels]
@@ -1542,6 +1552,7 @@ def main() -> int:
         analysis_sample_interval=args.analysis_sample_interval,
         live_analysis_interval=args.live_analysis_interval,
         show_hex_values=args.show_hex_values,
+        average_wetness_only=args.average_wetness_only,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},

@@ -59,10 +59,11 @@ After saving masks, run batch processing to reconstruct the annotations from a m
 python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --output-video wetness_overlay.mp4
 ```
 
-If `--output-video` is omitted, the processed video is written to `<out-dir>/<video>_hex_overlay.mp4`. Use `--hex-size` to change the hex cell radius in original video pixels; if it is omitted, the default hex size is `40` pixels:
+If `--output-video` is omitted, the processed video is written to `<out-dir>/<video>_hex_overlay.mp4`. Use `--hex-size` to change the hex cell radius in original video pixels; if it is omitted, the default hex size is `40` pixels. Add `--average-wetness-only` when you want the output frames left unmodified except for the calculated average wetness label:
 
 ```bash
 python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --hex-size 30
+python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --average-wetness-only
 ```
 
 ### Play as a live stream
@@ -73,7 +74,7 @@ To review the same analysis overlay without writing a file, play the input video
 python mask_mapper.py /path/to/video.mp4 --live-stream --load-dir mask_output
 ```
 
-Use `--live-analysis-interval` to control how often the live overlay is recalculated; for example, `0.5` updates twice per second, and `0` updates on every frame. Press `q` or Esc to stop the live stream window.
+Use `--live-analysis-interval` to control how often the live overlay is recalculated; for example, `0.5` updates twice per second, and `0` updates on every frame. Add `--average-wetness-only` to hide the hex/checker overlay and display only the average wetness label. Press `q` or Esc to stop the live stream window.
 
 ### Command-line flags
 
@@ -89,6 +90,7 @@ Use `--live-analysis-interval` to control how often the live overlay is recalcul
 | `--analysis-sample-interval` | `1.0` | Seconds between source frames sampled into the temporal average. Use `0` to sample every frame. |
 | `--hex-size` | `40` | Hex cell radius in original video pixels for interactive analysis and batch processing. |
 | `--show-hex-values` | Off | Draw numeric wetness values inside analysis hexes. Disabled by default to avoid expensive per-hex text rendering. |
+| `--average-wetness-only` | Off | Hide the analysis hex/checker overlay and draw only the calculated average wetness label over the source frame. |
 | `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. Cannot be combined with `--live-stream`. |
 | `--live-stream` | Off | Play the input video in an OpenCV window with the analysis hex overlay at the source FPS. Requires `--load-dir` and cannot be combined with `--process-video`. |
 | `--live-analysis-interval` | `1.0` | Seconds between live-stream analysis overlay recalculations. Use `0` to recalculate on every frame. |
