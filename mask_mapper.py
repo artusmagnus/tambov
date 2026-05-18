@@ -22,7 +22,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse, urlsplit, urlunsplit
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -361,6 +361,46 @@ def is_rtsp_source(source: str) -> bool:
     return urlparse(source).scheme.lower() == "rtsp"
 
 
+def redact_source_credentials(source: str) -> str:
+    parsed = urlsplit(source)
+    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+        return source
+    _userinfo, host_port = parsed.netloc.rsplit("@", 1)
+    return urlunsplit((parsed.scheme, f"***:***@{host_port}", parsed.path, parsed.query, parsed.fragment))
+
+
+def quote_url_part(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return quote(unquote(value), safe="")
+
+
+def rtsp_url_with_encoded_credentials(source: str) -> str | None:
+    if not is_rtsp_source(source):
+        return None
+    parsed = urlsplit(source)
+    if not parsed.username:
+        return None
+
+    username = quote_url_part(parsed.username)
+    password = quote_url_part(parsed.password)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    host_port = f"{hostname}:{parsed.port}" if parsed.port is not None else hostname
+    userinfo = username if password is None else f"{username}:{password}"
+    encoded_source = urlunsplit((parsed.scheme, f"{userinfo}@{host_port}", parsed.path, parsed.query, parsed.fragment))
+    return encoded_source if encoded_source != source else None
+
+
+def rtsp_source_attempts(source: str) -> tuple[tuple[str, str], ...]:
+    encoded_source = rtsp_url_with_encoded_credentials(source)
+    attempts = [(source, "original URL")]
+    if encoded_source is not None:
+        attempts.append((encoded_source, "URL-encoded credentials"))
+    return tuple(attempts)
+
+
 def rtsp_transport_attempts(source: str, transport: str) -> tuple[str, ...]:
     if not is_rtsp_source(source):
         return (transport,)
@@ -411,24 +451,35 @@ def format_rtsp_transport_attempt(transport: str) -> str:
 
 
 def open_capture(source: str, rtsp_transport: str = "auto") -> cv2.VideoCapture:
-    attempted_transports: list[str] = []
-    for transport_attempt in rtsp_transport_attempts(source, rtsp_transport):
-        capture = capture_with_ffmpeg_options(source, transport_attempt)
-        if capture.isOpened():
-            if is_rtsp_source(source) and transport_attempt != rtsp_transport:
-                print(f"Opened RTSP source with {format_rtsp_transport_attempt(transport_attempt)} transport.")
-            return capture
-        capture.release()
-        attempted_transports.append(format_rtsp_transport_attempt(transport_attempt))
+    attempted_openings: list[str] = []
+    source_attempts = rtsp_source_attempts(source) if is_rtsp_source(source) else ((source, "source"),)
+    for source_attempt, source_attempt_label in source_attempts:
+        for transport_attempt in rtsp_transport_attempts(source_attempt, rtsp_transport):
+            capture = capture_with_ffmpeg_options(source_attempt, transport_attempt)
+            formatted_transport = format_rtsp_transport_attempt(transport_attempt)
+            if capture.isOpened():
+                if is_rtsp_source(source):
+                    details = []
+                    if source_attempt_label != "original URL":
+                        details.append(source_attempt_label)
+                    if transport_attempt != rtsp_transport:
+                        details.append(f"{formatted_transport} transport")
+                    if details:
+                        print(f"Opened RTSP source with {' and '.join(details)}.")
+                return capture
+            capture.release()
+            attempted_openings.append(f"{source_attempt_label} / {formatted_transport}")
 
     hint = ""
+    safe_source = redact_source_credentials(source)
     if is_rtsp_source(source):
         hint = (
-            f" (tried RTSP transports: {', '.join(attempted_transports)}; "
+            f" (tried: {', '.join(attempted_openings)}; "
             "if SETUP still fails, verify the RTSP URL, credentials, channel path, "
-            "and that VLC/ffplay can open the stream)"
+            "and that VLC/ffplay can open the stream; if the password contains special "
+            "characters, also try percent-encoding them, e.g. ! as %21)"
         )
-    raise RuntimeError(f"Could not open source: {source}{hint}")
+    raise RuntimeError(f"Could not open source: {safe_source}{hint}")
 
 
 def source_name_stem(source: str) -> str:
