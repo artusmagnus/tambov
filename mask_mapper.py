@@ -119,6 +119,7 @@ class EditorState:
     live_analysis_interval: float
     show_hex_values: bool
     average_wetness_only: bool
+    use_opencl: bool
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"
@@ -241,6 +242,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use-opencl",
+        action="store_true",
+        help=(
+            "Use OpenCV OpenCL acceleration when available for resize, blending, "
+            "and temporal averaging operations."
+        ),
+    )
+    parser.add_argument(
         "--process-video",
         action="store_true",
         help="Process the entire video with the analysis hex overlay using masks loaded from --load-dir.",
@@ -288,6 +297,84 @@ def clamp_frame(index: int, frame_count: int) -> int:
     return min(max(index, 0), frame_count - 1)
 
 
+def configure_opencl(requested: bool) -> bool:
+    if not requested:
+        return False
+
+    if not hasattr(cv2, "ocl") or not cv2.ocl.haveOpenCL():
+        print("OpenCL acceleration requested, but this OpenCV build cannot use OpenCL; falling back to CPU.")
+        return False
+
+    cv2.ocl.setUseOpenCL(True)
+    if cv2.ocl.useOpenCL():
+        device_name = "unknown device"
+        if hasattr(cv2.ocl, "Device_getDefault"):
+            device_name = cv2.ocl.Device_getDefault().name()
+        print(f"OpenCL acceleration enabled for supported OpenCV operations ({device_name}).")
+        return True
+
+    print("OpenCL acceleration requested, but OpenCV did not enable it; falling back to CPU.")
+    return False
+
+
+def accelerated_resize(image: np.ndarray, size: tuple[int, int], interpolation: int, state: EditorState) -> np.ndarray:
+    if not state.use_opencl:
+        return cv2.resize(image, size, interpolation=interpolation)
+    return cv2.resize(cv2.UMat(image), size, interpolation=interpolation).get()
+
+
+def accelerated_add_weighted(
+    first: np.ndarray,
+    first_weight: float,
+    second: np.ndarray,
+    second_weight: float,
+    gamma: float,
+    state: EditorState,
+) -> np.ndarray:
+    if not state.use_opencl:
+        return cv2.addWeighted(first, first_weight, second, second_weight, gamma)
+    return cv2.addWeighted(cv2.UMat(first), first_weight, cv2.UMat(second), second_weight, gamma).get()
+
+
+def make_temporal_accumulator(frame: np.ndarray, state: EditorState) -> object:
+    accumulator = np.zeros_like(frame, dtype=np.float32)
+    if state.use_opencl:
+        return cv2.UMat(accumulator)
+    return accumulator
+
+
+def add_to_temporal_accumulator(accumulator: object, frame: np.ndarray, state: EditorState) -> object:
+    if state.use_opencl:
+        cv2.accumulate(cv2.UMat(frame), accumulator)
+        return accumulator
+    accumulator += frame.astype(np.float32)
+    return accumulator
+
+
+def subtract_from_temporal_accumulator(accumulator: object, frame: np.ndarray, state: EditorState) -> object:
+    if state.use_opencl:
+        return cv2.subtract(accumulator, cv2.UMat(frame.astype(np.float32)))
+    accumulator -= frame.astype(np.float32)
+    return accumulator
+
+
+def finish_temporal_average(accumulator: object, frame_count: int, state: EditorState) -> np.ndarray:
+    if frame_count <= 0:
+        raise ValueError("Cannot average an empty frame list.")
+    if state.use_opencl:
+        return cv2.convertScaleAbs(accumulator, alpha=1.0 / frame_count).get()
+    return np.clip(accumulator / frame_count, 0, 255).astype(np.uint8)
+
+
+def accelerated_temporal_average(frames: list[np.ndarray], state: EditorState) -> np.ndarray:
+    if not frames:
+        raise ValueError("Cannot average an empty frame list.")
+    accumulator = make_temporal_accumulator(frames[0], state)
+    for frame in frames:
+        accumulator = add_to_temporal_accumulator(accumulator, frame, state)
+    return finish_temporal_average(accumulator, len(frames), state)
+
+
 def read_frame(capture: cv2.VideoCapture, index: int) -> np.ndarray:
     capture.set(cv2.CAP_PROP_POS_FRAMES, index)
     ok, frame = capture.read()
@@ -332,15 +419,10 @@ def read_temporal_average_frame(
         end_index = frame_index + radius
     interval_frames = analysis_sample_interval_frames(state)
     first_sample_index = first_sample_index_in_range(start_index, interval_frames)
-    accumulator = np.zeros((state.height, state.width, 3), dtype=np.float64)
-    frame_total = 0
-    for sample_index in range(first_sample_index, end_index + 1, interval_frames):
-        accumulator += read_frame(capture, sample_index).astype(np.float64)
-        frame_total += 1
-
-    if frame_total == 0:
+    frames = [read_frame(capture, sample_index) for sample_index in range(first_sample_index, end_index + 1, interval_frames)]
+    if not frames:
         return read_frame(capture, frame_index)
-    return np.clip(accumulator / frame_total, 0, 255).astype(np.uint8)
+    return accelerated_temporal_average(frames, state)
 
 
 class TemporalFrameAverager:
@@ -351,20 +433,20 @@ class TemporalFrameAverager:
         self.interval_frames = analysis_sample_interval_frames(state)
         self.next_frame_index = 0
         self.frames: deque[tuple[int, np.ndarray]] = deque()
-        self.accumulator: np.ndarray | None = None
+        self.accumulator: object | None = None
         self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     def _append_frame(self, frame_index: int, frame: np.ndarray) -> None:
         if self.accumulator is None:
-            self.accumulator = np.zeros_like(frame, dtype=np.float32)
-        self.accumulator += frame.astype(np.float32)
+            self.accumulator = make_temporal_accumulator(frame, self.state)
+        self.accumulator = add_to_temporal_accumulator(self.accumulator, frame, self.state)
         self.frames.append((frame_index, frame))
 
     def _drop_before(self, start_index: int) -> None:
         while self.frames and self.frames[0][0] < start_index:
             _frame_index, frame = self.frames.popleft()
             if self.accumulator is not None:
-                self.accumulator -= frame.astype(np.float32)
+                self.accumulator = subtract_from_temporal_accumulator(self.accumulator, frame, self.state)
 
     def average_for_frame(self, frame_index: int, fallback_frame: np.ndarray) -> np.ndarray:
         if self.radius <= 0:
@@ -387,15 +469,16 @@ class TemporalFrameAverager:
         self._drop_before(start_index)
         if self.accumulator is None or not self.frames:
             return fallback_frame
-        return np.clip(self.accumulator / len(self.frames), 0, 255).astype(np.uint8)
+        return finish_temporal_average(self.accumulator, len(self.frames), self.state)
 
 
 class LiveFrameAverager:
     def __init__(self, state: EditorState) -> None:
+        self.state = state
         self.window_frames = max(0, int(round(state.analysis_time_window * (state.fps if state.fps > 0 else 30.0))))
         self.interval_frames = analysis_sample_interval_frames(state)
         self.frames: deque[tuple[int, np.ndarray]] = deque()
-        self.accumulator: np.ndarray | None = None
+        self.accumulator: object | None = None
 
     def average_for_frame(self, frame_index: int, frame: np.ndarray) -> np.ndarray:
         if self.window_frames <= 0:
@@ -403,18 +486,18 @@ class LiveFrameAverager:
 
         if frame_index % self.interval_frames == 0:
             if self.accumulator is None:
-                self.accumulator = np.zeros_like(frame, dtype=np.float32)
-            self.accumulator += frame.astype(np.float32)
+                self.accumulator = make_temporal_accumulator(frame, self.state)
+            self.accumulator = add_to_temporal_accumulator(self.accumulator, frame, self.state)
             self.frames.append((frame_index, frame))
 
         oldest_allowed = max(0, frame_index - self.window_frames + 1)
         while self.frames and self.frames[0][0] < oldest_allowed:
             _old_frame_index, old_frame = self.frames.popleft()
-            self.accumulator -= old_frame.astype(np.float32)
+            self.accumulator = subtract_from_temporal_accumulator(self.accumulator, old_frame, self.state)
 
         if self.accumulator is None or not self.frames:
             return frame
-        return np.clip(self.accumulator / len(self.frames), 0, 255).astype(np.uint8)
+        return finish_temporal_average(self.accumulator, len(self.frames), self.state)
 
 
 def update_analysis_sample_frame(
@@ -436,7 +519,7 @@ def update_analysis_sample_frame(
 def make_display_frame(frame: np.ndarray, state: EditorState) -> np.ndarray:
     if state.scale == 1.0:
         return frame.copy()
-    return cv2.resize(frame, state.display_size, interpolation=cv2.INTER_AREA)
+    return accelerated_resize(frame, state.display_size, cv2.INTER_AREA, state)
 
 
 def set_frame_view_frame(view: FrameView, state: EditorState, frame: np.ndarray) -> None:
@@ -455,7 +538,7 @@ def set_frame_view_frame(view: FrameView, state: EditorState, frame: np.ndarray)
 def make_display_mask(mask: np.ndarray, state: EditorState) -> np.ndarray:
     if state.scale == 1.0:
         return mask.copy()
-    return cv2.resize(mask, state.display_size, interpolation=cv2.INTER_NEAREST)
+    return accelerated_resize(mask, state.display_size, cv2.INTER_NEAREST, state)
 
 
 def refresh_display_mask(state: EditorState, label: str) -> None:
@@ -1202,7 +1285,7 @@ def make_analysis_video_frame(
     output_frame = frame.copy()
     if not state.average_wetness_only and view.hex_mask is not None:
         hex_pixels = view.hex_mask > 0
-        blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
+        blended_hex = accelerated_add_weighted(hex_overlay, 0.2, frame, 0.8, 0, state)
         output_frame[hex_pixels] = blended_hex[hex_pixels]
     draw_analysis_average_wetness(output_frame, view)
     return output_frame
@@ -1218,7 +1301,7 @@ def render_analysis_overlay_from_cache(
     output_frame = frame.copy()
     if not state.average_wetness_only and hex_overlay is not None and hex_mask is not None:
         hex_pixels = hex_mask > 0
-        blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
+        blended_hex = accelerated_add_weighted(hex_overlay, 0.2, frame, 0.8, 0, state)
         output_frame[hex_pixels] = blended_hex[hex_pixels]
     if average_wetness is not None:
         draw_top_right_label(output_frame, f"Avg wetness: {average_wetness:.0f}")
@@ -1377,7 +1460,7 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
 
         mask_pixels = np.any(color_layer > 0, axis=2)
         if np.any(mask_pixels):
-            blended = cv2.addWeighted(color_layer, state.alpha, display_frame, 1.0 - state.alpha, 0)
+            blended = accelerated_add_weighted(color_layer, state.alpha, display_frame, 1.0 - state.alpha, 0, state)
             base_overlay[mask_pixels] = blended[mask_pixels]
         view.base_overlay = base_overlay
         state.masks_dirty = False
@@ -1387,7 +1470,7 @@ def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         hex_overlay = make_hex_overlay(state, view)
         if not state.average_wetness_only and view.hex_mask is not None:
             hex_pixels = view.hex_mask > 0
-            blended_hex = cv2.addWeighted(hex_overlay, 0.2, display_frame, 0.8, 0)
+            blended_hex = accelerated_add_weighted(hex_overlay, 0.2, display_frame, 0.8, 0, state)
             overlay[hex_pixels] = blended_hex[hex_pixels]
 
     if state.cursor is not None:
@@ -1523,6 +1606,8 @@ def main() -> int:
     if args.max_display_width < 0:
         raise ValueError("--max-display-width must be 0 or greater.")
 
+    use_opencl = configure_opencl(args.use_opencl)
+
     capture = cv2.VideoCapture(str(args.video))
     if not capture.isOpened():
         raise RuntimeError(f"Could not open video: {args.video}")
@@ -1553,6 +1638,7 @@ def main() -> int:
         live_analysis_interval=args.live_analysis_interval,
         show_hex_values=args.show_hex_values,
         average_wetness_only=args.average_wetness_only,
+        use_opencl=use_opencl,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
