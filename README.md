@@ -80,6 +80,23 @@ python mask_mapper.py --stream rtsp://192.168.1.52/axis-media/media.amp --live-s
 
 Use `--live-analysis-interval` to control how often the live overlay is recalculated; for example, `0.5` updates twice per second, and `0` updates on every frame. Add `--fps 10` to process roughly every third frame from a 30 FPS source using `VideoCapture.grab()` to skip intermediate frames. For RTSP/HTTP/camera sources, failed reads trigger reconnect attempts every `--stream-reconnect-delay` seconds. Add `--average-wetness-only` to hide the hex/checker overlay and display only the average wetness label. Press `q` or Esc to stop the live stream window.
 
+If the stream URL contains a `!` in the username/password, wrap the URL in **single quotes** in Bash/Zsh. Double quotes still allow history expansion, which causes errors like `event not found` before Python starts. For example:
+
+```bash
+python mask_mapper.py \
+  'rtsp://admin:!Qwerty1234@192.168.1.246:554/Streaming/Channels/101' \
+  --live-stream \
+  --load-dir /home/arm-068/Desktop/Projects/algo/Other/tambov \
+  --out-dir /home/arm-068/Desktop/Projects/algo/Other/tambov \
+  --analysis-max-distance 0.03 \
+  --hex-size 20 \
+  --analysis-time-window 10 \
+  --average-wetness-only \
+  --use-opencl
+```
+
+Alternatively, escape the exclamation mark as `\!` or disable history expansion in the current shell with `set +H` before running the command.
+
 For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
 
 #### How masks are used with a live stream
