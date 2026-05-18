@@ -100,14 +100,14 @@ Alternatively, escape the exclamation mark as `\!` or disable history expansion 
 
 For RTSP cameras, the tool forces OpenCV's FFmpeg backend to avoid image-sequence fallback warnings, and `--rtsp-transport auto` tries TCP, UDP, UDP multicast, HTTP tunneling, and finally OpenCV's default transport for the original URL, a trailing-slash URL, the URL-encoded-credentials variant, and that encoded variant with a trailing slash. If you still see an error such as `method SETUP failed: 500 Internal Server Error`, verify the camera URL/channel path and credentials in VLC or `ffplay`, then force the transport that works there with `--rtsp-transport tcp` or `--rtsp-transport udp`.
 
-For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. This is required for RTSP live streams because the saved PNG masks are binary labels only; the tool must sample the annotated calibration frames to rebuild the dry-to-wet colour model before applying it to current live frames. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
+For a true live source, the saved annotation set now includes the annotated source frame images, so the dry-to-wet colour model can be rebuilt from `--load-dir` without reopening the calibration video. If you are loading an older mask folder that does not contain `<video>_frame_<frame>_image.png` files, pass `--analysis-source` to point at the seekable annotated video that produced the masks. The live source is then used only for current frames, while the saved frame images or analysis source are used once to rebuild the dry-to-wet calibration model.
 
 #### How masks are used with a live stream
 
 Live stream mode does **not** require drawing masks on the RTSP/HTTP/camera stream itself. Instead, you first annotate a calibration video or representative source with the same camera view, save masks, then load those masks while reading the live stream:
 
 1. The persistent `floor` mask defines the live frame pixels that can be analyzed. It must match the live camera geometry, resolution, crop, and perspective. If the live stream resolution differs from the saved mask dimensions, loading fails so the overlay is not applied to the wrong pixels.
-2. Saved `dry` and `wet` masks are calibration examples only. On startup, `--live-stream` opens `--analysis-source` (or the main source if `--analysis-source` is omitted), reads the annotated frame numbers from the saved filenames, samples those frames, and learns the per-hex dry-to-wet OKLab model. After that, the live stream frames are projected through the learned model; the old dry/wet masks are not painted onto the live frames.
+2. Saved `dry` and `wet` masks are calibration examples only. On startup, `--live-stream` first uses saved `<video>_frame_<frame>_image.png` files from `--load-dir` as the colour source for the annotated frame numbers. If those images are absent, it falls back to `--analysis-source` (or the main source for replaying a file). It then learns the per-hex dry-to-wet OKLab model. After that, the live stream frames are projected through the learned model; the old dry/wet masks are not painted onto the live frames.
 3. Saved `obstruction` masks are frame-specific. They are useful when replaying an annotated file as a live stream, but a true endless RTSP/camera stream normally has no matching saved obstruction mask for each incoming frame. Dynamic obstructions are therefore handled by temporal averaging and `--analysis-max-distance`, not by manually saved per-frame obstruction masks.
 4. During live playback, each incoming frame is compared against the learned model inside floor hexes. The tool renders the wetness overlay and average wetness value, or only the average label when `--average-wetness-only` is set.
 
@@ -118,11 +118,11 @@ Typical live workflow:
 python mask_mapper.py /path/to/annotated_calibration_video.mp4 --out-dir mask_output
 
 # 2. Apply those masks/model to the live camera stream.
+# --analysis-source is only needed for older mask folders without saved frame images.
 python mask_mapper.py \
   --stream rtsp://192.168.1.52/axis-media/media.amp \
   --live-stream \
-  --load-dir mask_output \
-  --analysis-source /path/to/annotated_calibration_video.mp4
+  --load-dir mask_output
 ```
 
 ### Command-line flags
@@ -147,7 +147,7 @@ python mask_mapper.py \
 | `--fps` | Source FPS | Target processing/display FPS for `--live-stream`; lower values skip source frames with `VideoCapture.grab()`. |
 | `--stream-reconnect-delay` | `2.0` | Seconds to wait before reopening a failed live source read. Used for RTSP/HTTP/camera sources. |
 | `--rtsp-transport` | `auto` | RTSP transport passed to OpenCV/FFmpeg. `auto` tries `tcp`, `udp`, `udp_multicast`, `http`, then OpenCV's default across original/encoded/trailing-slash RTSP URL variants; set a specific transport if you know what the camera supports. |
-| `--analysis-source` | Main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. Required for RTSP live sources. |
+| `--analysis-source` | Saved frame images, then main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. Only needed when loading older mask folders that do not contain saved annotation frame images. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
 | `--brush-size` | `20` | Initial brush radius in original video pixels. |
 | `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
@@ -195,9 +195,11 @@ python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output 
 
 ### Output files
 
-Saving writes these mask images to `--out-dir`:
+Saving writes these images to `--out-dir`:
 
 - `<video>_floor_mask.png` — persistent binary floor-area mask shared by all frames.
-- `<video>_frame_<frame>_dry_mask.png` — frame-specific binary dry-floor mask for each frame that has condition labels.
-- `<video>_frame_<frame>_wet_mask.png` — frame-specific binary wet-floor mask for each frame that has condition labels.
-- `<video>_frame_<frame>_obstruction_mask.png` — frame-specific binary obstruction mask for each frame that has condition labels.
+- `<video>_frame_<frame>_image.png` — original source frame image for each annotated frame. These images let live-stream analysis rebuild the colour model from the saved folder without reopening the calibration video.
+- `<video>_frame_<frame>_labels.png` — single numbered annotation mask for the frame: `0` background, `1` floor, `2` dry, `3` wet, and `4` obstruction. This is the preferred load format for new annotations.
+- `<video>_frame_<frame>_dry_mask.png` — frame-specific binary dry-floor mask kept for backward compatibility and inspection.
+- `<video>_frame_<frame>_wet_mask.png` — frame-specific binary wet-floor mask kept for backward compatibility and inspection.
+- `<video>_frame_<frame>_obstruction_mask.png` — frame-specific binary obstruction mask kept for backward compatibility and inspection.

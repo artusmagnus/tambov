@@ -152,6 +152,7 @@ class EditorState:
     masks: dict[str, np.ndarray] = field(default_factory=dict)
     display_masks: dict[str, np.ndarray] = field(default_factory=dict)
     condition_masks_by_frame: dict[int, dict[str, np.ndarray]] = field(default_factory=dict)
+    annotation_frames_by_index: dict[int, np.ndarray] = field(default_factory=dict)
     current_condition_frame: int = 0
     masks_dirty: bool = True
     history: list[list[MaskSnapshot]] = field(default_factory=list)
@@ -312,8 +313,8 @@ def parse_args() -> argparse.Namespace:
         "--analysis-source",
         help=(
             "Optional seekable video source used to build the dry-to-wet model before "
-            "--live-stream reads from the live source. Required when --live-stream reads "
-            "from an RTSP source, because saved masks do not contain source frame colours."
+            "--live-stream reads from the live source. Needed for RTSP live streams only "
+            "when --load-dir does not contain saved annotation frame images."
         ),
     )
     parser.add_argument(
@@ -1035,7 +1036,29 @@ def has_condition_labels(frame_masks: dict[str, np.ndarray]) -> bool:
     return any(np.any(frame_masks[label] > 0) for label in CONDITION_LABELS)
 
 
-def save_outputs(state: EditorState) -> None:
+def make_numbered_annotation_mask(state: EditorState, frame_masks: dict[str, np.ndarray]) -> np.ndarray:
+    numbered_mask = np.zeros((state.height, state.width), dtype=np.uint8)
+    numbered_mask[state.masks["floor"] > 0] = MASK_CLASSES["floor"]["id"]
+    for label in CONDITION_LABELS:
+        numbered_mask[frame_masks[label] > 0] = MASK_CLASSES[label]["id"]
+    return numbered_mask
+
+
+def frame_for_annotation_save(state: EditorState, capture: cv2.VideoCapture | None, frame_index: int) -> np.ndarray | None:
+    if frame_index in state.annotation_frames_by_index:
+        return state.annotation_frames_by_index[frame_index]
+    if capture is None:
+        return None
+    try:
+        frame = read_frame(capture, frame_index)
+    except RuntimeError as error:
+        print(f"Skipping source frame save for frame {frame_index + 1}: {error}")
+        return None
+    state.annotation_frames_by_index[frame_index] = frame
+    return frame
+
+
+def save_outputs(state: EditorState, capture: cv2.VideoCapture | None = None) -> None:
     state.out_dir.mkdir(parents=True, exist_ok=True)
     stem = state.source_stem
 
@@ -1051,6 +1074,12 @@ def save_outputs(state: EditorState) -> None:
         prefix = f"{stem}_frame_{frame_number:06d}"
         frame_output: dict[str, str | int] = {"frame_index": frame_index}
 
+        frame = frame_for_annotation_save(state, capture, frame_index)
+        if frame is not None:
+            frame_path = state.out_dir / f"{prefix}_image.png"
+            cv2.imwrite(str(frame_path), frame)
+            frame_output["image"] = str(frame_path)
+
         used_pixels = np.zeros((state.height, state.width), dtype=bool)
         for label in CONDITION_LABELS:
             clipped_mask = cv2.bitwise_and(frame_masks[label], state.masks["floor"])
@@ -1062,10 +1091,17 @@ def save_outputs(state: EditorState) -> None:
             cv2.imwrite(str(mask_path), clipped_mask)
             frame_output[f"{label}_mask"] = str(mask_path)
 
+        numbered_mask_path = state.out_dir / f"{prefix}_labels.png"
+        cv2.imwrite(str(numbered_mask_path), make_numbered_annotation_mask(state, frame_masks))
+        frame_output["labels"] = str(numbered_mask_path)
+
         if frame_index == state.current_condition_frame:
             bind_condition_masks_to_frame(state, frame_index)
 
         frame_outputs[str(frame_number)] = frame_output
+
+    if capture is not None:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, state.frame_index)
 
     state.dirty = False
     print(f"Saved floor mask and {len(frame_outputs)} frame-specific annotation set(s) to: {state.out_dir.resolve()}")
@@ -1080,6 +1116,28 @@ def load_binary_mask(path: Path, width: int, height: int) -> np.ndarray:
             f"Mask {path} has shape {mask.shape}, expected {(height, width)} for this video."
         )
     return np.where(mask > 0, 255, 0).astype(np.uint8)
+
+
+def load_annotation_frame(path: Path, width: int, height: int) -> np.ndarray:
+    frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise RuntimeError(f"Could not load annotation frame image: {path}")
+    if frame.shape[:2] != (height, width):
+        raise RuntimeError(
+            f"Annotation frame {path} has shape {frame.shape[:2]}, expected {(height, width)}."
+        )
+    return frame
+
+
+def load_numbered_annotation_mask(path: Path, width: int, height: int) -> np.ndarray:
+    mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise RuntimeError(f"Could not load numbered annotation mask: {path}")
+    if mask.shape != (height, width):
+        raise RuntimeError(
+            f"Numbered annotation mask {path} has shape {mask.shape}, expected {(height, width)}."
+        )
+    return mask.astype(np.uint8)
 
 
 def find_floor_mask(load_dir: Path, video_stem: str) -> Path:
@@ -1109,6 +1167,34 @@ def parse_condition_mask_filename(path: Path, video_stem: str) -> tuple[int, str
     return frame_number - 1, label
 
 
+def parse_annotation_frame_filename(path: Path, video_stem: str) -> int | None:
+    escaped_stem = re.escape(video_stem)
+    match = re.match(rf"^{escaped_stem}_frame_(\d+)_image\.png$", path.name)
+    if not match:
+        return None
+    return int(match.group(1)) - 1
+
+
+def parse_numbered_annotation_mask_filename(path: Path, video_stem: str) -> int | None:
+    escaped_stem = re.escape(video_stem)
+    match = re.match(rf"^{escaped_stem}_frame_(\d+)_labels\.png$", path.name)
+    if not match:
+        return None
+    return int(match.group(1)) - 1
+
+
+def load_dir_has_saved_annotation_frames(load_dir: Path | None) -> bool:
+    return bool(load_dir and load_dir.is_dir() and any(load_dir.glob("*_frame_*_image.png")))
+
+
+def load_numbered_annotation_into_masks(state: EditorState, path: Path, frame_index: int) -> None:
+    numbered_mask = load_numbered_annotation_mask(path, state.width, state.height)
+    state.masks["floor"][numbered_mask > 0] = 255
+    frame_masks = state.condition_masks_by_frame.setdefault(frame_index, make_empty_condition_masks(state))
+    for label in CONDITION_LABELS:
+        frame_masks[label] = np.where(numbered_mask == MASK_CLASSES[label]["id"], 255, 0).astype(np.uint8)
+
+
 def load_outputs(state: EditorState, load_dir: Path) -> None:
     if not load_dir.is_dir():
         raise RuntimeError(f"Mask load path must be a directory: {load_dir}")
@@ -1118,8 +1204,31 @@ def load_outputs(state: EditorState, load_dir: Path) -> None:
     annotation_stem = floor_mask_path.name.removesuffix("_floor_mask.png")
     state.masks["floor"] = load_binary_mask(floor_mask_path, state.width, state.height)
     state.condition_masks_by_frame.clear()
+    state.annotation_frames_by_index.clear()
 
     loaded_frames: set[int] = set()
+    loaded_annotation_images: set[int] = set()
+
+    for frame_path in sorted(load_dir.glob("*_frame_*_image.png")):
+        frame_index = parse_annotation_frame_filename(frame_path, annotation_stem)
+        if frame_index is None:
+            continue
+        if frame_index < 0 or (state.frame_count > 0 and frame_index >= state.frame_count):
+            print(f"Skipping frame {frame_index + 1} image because it is outside this video/source: {frame_path}")
+            continue
+        state.annotation_frames_by_index[frame_index] = load_annotation_frame(frame_path, state.width, state.height)
+        loaded_annotation_images.add(frame_index)
+
+    for numbered_mask_path in sorted(load_dir.glob("*_frame_*_labels.png")):
+        frame_index = parse_numbered_annotation_mask_filename(numbered_mask_path, annotation_stem)
+        if frame_index is None:
+            continue
+        if frame_index < 0 or (state.frame_count > 0 and frame_index >= state.frame_count):
+            print(f"Skipping frame {frame_index + 1} numbered mask because it is outside this video/source: {numbered_mask_path}")
+            continue
+        load_numbered_annotation_into_masks(state, numbered_mask_path, frame_index)
+        loaded_frames.add(frame_index)
+
     for mask_path in sorted(load_dir.glob("*_frame_*_mask.png")):
         parsed = parse_condition_mask_filename(mask_path, annotation_stem)
         if parsed is None:
@@ -1127,7 +1236,7 @@ def load_outputs(state: EditorState, load_dir: Path) -> None:
 
         frame_index, label = parsed
         if frame_index < 0 or (state.frame_count > 0 and frame_index >= state.frame_count):
-            print(f"Skipping frame {frame_index + 1} mask because it is outside this video: {mask_path}")
+            print(f"Skipping frame {frame_index + 1} mask because it is outside this video/source: {mask_path}")
             continue
 
         frame_masks = state.condition_masks_by_frame.setdefault(frame_index, make_empty_condition_masks(state))
@@ -1140,7 +1249,10 @@ def load_outputs(state: EditorState, load_dir: Path) -> None:
     state.history.clear()
     state.dirty = False
     invalidate_masks(state)
-    print(f"Loaded floor mask and {len(loaded_frames)} frame-specific annotation set(s) from: {load_dir}")
+    print(
+        f"Loaded floor mask, {len(loaded_frames)} frame-specific annotation set(s), "
+        f"and {len(loaded_annotation_images)} saved source frame image(s) from: {load_dir}"
+    )
 
 
 def srgb_to_linear(value: np.ndarray) -> np.ndarray:
@@ -1298,16 +1410,32 @@ def get_display_polygon(state: EditorState, cell: HexCell) -> np.ndarray:
     return state.display_polygons[cell.index]
 
 
+def annotation_frame_for_analysis(
+    state: EditorState,
+    capture: cv2.VideoCapture | None,
+    frame_index: int,
+) -> np.ndarray:
+    if frame_index in state.annotation_frames_by_index:
+        return state.annotation_frames_by_index[frame_index]
+    if capture is None:
+        raise RuntimeError(
+            f"No saved source frame image is available for annotated frame {frame_index + 1}; "
+            "rerun annotation saving with this version or pass --analysis-source pointing "
+            "to the original calibration video."
+        )
+    return read_frame(capture, frame_index)
+
+
 def collect_hex_color_samples(
     state: EditorState,
-    capture: cv2.VideoCapture,
+    capture: cv2.VideoCapture | None,
 ) -> dict[int, dict[str, list[np.ndarray]]]:
     samples: dict[int, dict[str, list[np.ndarray]]] = {}
     hex_cells = get_hex_cells(state)
     for frame_index, frame_masks in sorted(state.condition_masks_by_frame.items()):
         if not (np.any(frame_masks["dry"] > 0) or np.any(frame_masks["wet"] > 0)):
             continue
-        frame = read_frame(capture, frame_index)
+        frame = annotation_frame_for_analysis(state, capture, frame_index)
         for cell in hex_cells:
             average_color = average_bgr_in_cell(frame, cell)
             if average_color is None:
@@ -1367,7 +1495,7 @@ def infer_single_state_wetness_models(
     return inferred_models
 
 
-def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture) -> None:
+def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -> None:
     samples = collect_hex_color_samples(state, capture)
     complete_models: dict[int, HexWetnessModel] = {}
     for cell_index, cell_samples in samples.items():
@@ -1647,7 +1775,7 @@ def live_analysis_interval_frames(state: EditorState) -> int:
 def play_live_stream_with_analysis_overlay(
     state: EditorState,
     capture: cv2.VideoCapture,
-    analysis_capture: cv2.VideoCapture,
+    analysis_capture: cv2.VideoCapture | None,
 ) -> int:
     if not state.condition_masks_by_frame:
         raise RuntimeError("No mask annotations are loaded; pass --load-dir with saved mask PNGs.")
@@ -1879,12 +2007,19 @@ def main() -> int:
         raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
     if args.live_stream and not args.load_dir:
         raise ValueError("--live-stream requires --load-dir so masks can be reconstructed.")
-    if args.live_stream and is_rtsp_source(args.source) and not args.analysis_source:
+    if (
+        args.live_stream
+        and is_rtsp_source(args.source)
+        and not args.analysis_source
+        and not load_dir_has_saved_annotation_frames(args.load_dir)
+    ):
         raise ValueError(
-            "--live-stream with an RTSP source requires --analysis-source pointing to the "
-            "seekable calibration video used to create the masks. The saved PNG masks are "
-            "binary labels only; the tool must sample the calibration video frames to rebuild "
-            "the dry-to-wet colour model before applying it to the live stream."
+            "--live-stream with an RTSP source requires either saved annotation frame images "
+            "(<video>_frame_<frame>_image.png) in --load-dir or --analysis-source pointing "
+            "to the seekable calibration video used to create the masks. The saved binary "
+            "masks alone do not contain source frame colours, so the tool needs one of "
+            "those image sources to rebuild the dry-to-wet colour model before applying "
+            "it to the live stream."
         )
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
@@ -1964,12 +2099,12 @@ def main() -> int:
             capture.release()
 
     if args.live_stream:
-        analysis_source = args.analysis_source or source
-        analysis_capture = open_capture(analysis_source, args.rtsp_transport)
+        analysis_capture = open_capture(args.analysis_source, args.rtsp_transport) if args.analysis_source else None
         try:
             return play_live_stream_with_analysis_overlay(state, capture, analysis_capture)
         finally:
-            analysis_capture.release()
+            if analysis_capture is not None:
+                analysis_capture.release()
             capture.release()
             cv2.destroyAllWindows()
 
@@ -2031,7 +2166,7 @@ def main() -> int:
         elif key == ord("i"):
             clip_to_floor(state)
         elif key == ord("s"):
-            save_outputs(state)
+            save_outputs(state, capture)
         elif key in (ord("n"), 83):
             set_frame(state, view, capture, window_name, state.frame_index + 1)
         elif key in (ord("p"), 81):
