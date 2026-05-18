@@ -82,6 +82,29 @@ Use `--live-analysis-interval` to control how often the live overlay is recalcul
 
 For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
 
+#### How masks are used with a live stream
+
+Live stream mode does **not** require drawing masks on the RTSP/HTTP/camera stream itself. Instead, you first annotate a calibration video or representative source with the same camera view, save masks, then load those masks while reading the live stream:
+
+1. The persistent `floor` mask defines the live frame pixels that can be analyzed. It must match the live camera geometry, resolution, crop, and perspective. If the live stream resolution differs from the saved mask dimensions, loading fails so the overlay is not applied to the wrong pixels.
+2. Saved `dry` and `wet` masks are calibration examples only. On startup, `--live-stream` opens `--analysis-source` (or the main source if `--analysis-source` is omitted), reads the annotated frame numbers from the saved filenames, samples those frames, and learns the per-hex dry-to-wet OKLab model. After that, the live stream frames are projected through the learned model; the old dry/wet masks are not painted onto the live frames.
+3. Saved `obstruction` masks are frame-specific. They are useful when replaying an annotated file as a live stream, but a true endless RTSP/camera stream normally has no matching saved obstruction mask for each incoming frame. Dynamic obstructions are therefore handled by temporal averaging and `--analysis-max-distance`, not by manually saved per-frame obstruction masks.
+4. During live playback, each incoming frame is compared against the learned model inside floor hexes. The tool renders the wetness overlay and average wetness value, or only the average label when `--average-wetness-only` is set.
+
+Typical live workflow:
+
+```bash
+# 1. Annotate a seekable calibration clip from the same camera.
+python mask_mapper.py /path/to/annotated_calibration_video.mp4 --out-dir mask_output
+
+# 2. Apply those masks/model to the live camera stream.
+python mask_mapper.py \
+  --stream rtsp://192.168.1.52/axis-media/media.amp \
+  --live-stream \
+  --load-dir mask_output \
+  --analysis-source /path/to/annotated_calibration_video.mp4
+```
+
 ### Command-line flags
 
 | Argument | Default | Description |
