@@ -97,7 +97,7 @@ python mask_mapper.py \
 
 Alternatively, escape the exclamation mark as `\!` or disable history expansion in the current shell with `set +H` before running the command.
 
-For RTSP cameras, the tool now asks OpenCV/FFmpeg to use TCP transport by default because many cameras reject the default transport during the RTSP `SETUP` phase. If you still see an error such as `method SETUP failed: 500 Internal Server Error`, retry with `--rtsp-transport udp` or `--rtsp-transport auto` to match the camera/server configuration.
+For RTSP cameras, the tool now uses `--rtsp-transport auto` by default, which tries TCP, UDP, UDP multicast, HTTP tunneling, and finally OpenCV's default transport. If you still see an error such as `method SETUP failed: 500 Internal Server Error`, verify the camera URL/channel path and credentials in VLC or `ffplay`, then force the transport that works there with `--rtsp-transport tcp` or `--rtsp-transport udp`.
 
 For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
 
@@ -145,7 +145,7 @@ python mask_mapper.py \
 | `--live-analysis-interval` | `1.0` | Seconds between live-stream analysis overlay recalculations. Use `0` to recalculate on every frame. |
 | `--fps` | Source FPS | Target processing/display FPS for `--live-stream`; lower values skip source frames with `VideoCapture.grab()`. |
 | `--stream-reconnect-delay` | `2.0` | Seconds to wait before reopening a failed live source read. Used for RTSP/HTTP/camera sources. |
-| `--rtsp-transport` | `tcp` | RTSP transport passed to OpenCV/FFmpeg (`tcp`, `udp`, `udp_multicast`, `http`, or `auto`). Try `udp` or `auto` if the camera reports RTSP `SETUP` failures. |
+| `--rtsp-transport` | `auto` | RTSP transport passed to OpenCV/FFmpeg. `auto` tries `tcp`, `udp`, `udp_multicast`, `http`, then OpenCV's default; set a specific transport if you know what the camera supports. |
 | `--analysis-source` | Main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
 | `--brush-size` | `20` | Initial brush radius in original video pixels. |

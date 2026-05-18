@@ -301,11 +301,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--rtsp-transport",
-        choices=("tcp", "udp", "udp_multicast", "http", "auto"),
-        default="tcp",
+        choices=("auto", "tcp", "udp", "udp_multicast", "http"),
+        default="auto",
         help=(
             "RTSP transport passed to OpenCV/FFmpeg through OPENCV_FFMPEG_CAPTURE_OPTIONS. "
-            "The default tcp avoids many camera SETUP failures; use auto to leave OpenCV defaults untouched."
+            "The default auto tries tcp, udp, udp_multicast, http, then OpenCV's default."
         ),
     )
     parser.add_argument(
@@ -357,8 +357,20 @@ def source_capture_value(source: str) -> str | int:
     return source
 
 
+def is_rtsp_source(source: str) -> bool:
+    return urlparse(source).scheme.lower() == "rtsp"
+
+
+def rtsp_transport_attempts(source: str, transport: str) -> tuple[str, ...]:
+    if not is_rtsp_source(source):
+        return (transport,)
+    if transport == "auto":
+        return ("tcp", "udp", "udp_multicast", "http", "auto")
+    return (transport,)
+
+
 def rtsp_transport_option(source: str, transport: str) -> str | None:
-    if transport == "auto" or urlparse(source).scheme.lower() != "rtsp":
+    if transport == "auto" or not is_rtsp_source(source):
         return None
     return f"rtsp_transport;{transport}"
 
@@ -369,21 +381,23 @@ def ffmpeg_capture_options_with_rtsp_transport(source: str, transport: str) -> s
         return None
 
     existing_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
-    if "rtsp_transport" in existing_options:
-        return None
-    if not existing_options:
-        return transport_option
-    return f"{existing_options}|{transport_option}"
+    options = [
+        option
+        for option in existing_options.split("|")
+        if option and not option.startswith("rtsp_transport;")
+    ]
+    options.append(transport_option)
+    return "|".join(options)
 
 
-def open_capture(source: str, rtsp_transport: str = "tcp") -> cv2.VideoCapture:
+def capture_with_ffmpeg_options(source: str, rtsp_transport: str) -> cv2.VideoCapture:
     ffmpeg_options = ffmpeg_capture_options_with_rtsp_transport(source, rtsp_transport)
     previous_ffmpeg_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
     if ffmpeg_options is not None:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
 
     try:
-        capture = cv2.VideoCapture(source_capture_value(source))
+        return cv2.VideoCapture(source_capture_value(source))
     finally:
         if ffmpeg_options is not None:
             if previous_ffmpeg_options is None:
@@ -391,15 +405,30 @@ def open_capture(source: str, rtsp_transport: str = "tcp") -> cv2.VideoCapture:
             else:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_ffmpeg_options
 
-    if not capture.isOpened():
-        hint = ""
-        if urlparse(source).scheme.lower() == "rtsp":
-            hint = (
-                f" (tried RTSP transport {rtsp_transport!r}; if the camera rejects SETUP, "
-                "try --rtsp-transport udp or --rtsp-transport auto)"
-            )
-        raise RuntimeError(f"Could not open source: {source}{hint}")
-    return capture
+
+def format_rtsp_transport_attempt(transport: str) -> str:
+    return "OpenCV default" if transport == "auto" else transport
+
+
+def open_capture(source: str, rtsp_transport: str = "auto") -> cv2.VideoCapture:
+    attempted_transports: list[str] = []
+    for transport_attempt in rtsp_transport_attempts(source, rtsp_transport):
+        capture = capture_with_ffmpeg_options(source, transport_attempt)
+        if capture.isOpened():
+            if is_rtsp_source(source) and transport_attempt != rtsp_transport:
+                print(f"Opened RTSP source with {format_rtsp_transport_attempt(transport_attempt)} transport.")
+            return capture
+        capture.release()
+        attempted_transports.append(format_rtsp_transport_attempt(transport_attempt))
+
+    hint = ""
+    if is_rtsp_source(source):
+        hint = (
+            f" (tried RTSP transports: {', '.join(attempted_transports)}; "
+            "if SETUP still fails, verify the RTSP URL, credentials, channel path, "
+            "and that VLC/ffplay can open the stream)"
+        )
+    raise RuntimeError(f"Could not open source: {source}{hint}")
 
 
 def source_name_stem(source: str) -> str:
