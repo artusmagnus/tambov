@@ -65,19 +65,30 @@ If `--output-video` is omitted, the processed video is written to `<out-dir>/<vi
 python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --hex-size 30
 ```
 
+### Play as a live stream
+
+To review the same analysis overlay without writing a file, play the input video like a live stream. The stream uses the saved masks, runs the analysis once, displays frames at the source FPS, and applies temporal averaging only over frames that have already arrived:
+
+```bash
+python mask_mapper.py /path/to/video.mp4 --live-stream --load-dir mask_output
+```
+
+Press `q` or Esc to stop the live stream window.
+
 ### Command-line flags
 
 | Argument | Default | Description |
 | --- | --- | --- |
 | `video` | Required | Path to the input video file. |
 | `--out-dir` | `mask_output` | Directory where saved mask PNGs are written. Batch mode also uses it for the default output video path. |
-| `--load-dir` | Not set | Reconstruct a prior annotation session by scanning this directory for saved mask PNGs. Required with `--process-video`. |
-| `--scale` | `1.0` | Interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `--process-video`, which renders at full resolution. |
+| `--load-dir` | Not set | Reconstruct a prior annotation session by scanning this directory for saved mask PNGs. Required with `--process-video` and `--live-stream`. |
+| `--scale` | `1.0` | Interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `--process-video` and `--live-stream`, which render at full resolution. |
 | `--alpha` | `0.45` | Opacity for the regular mask-color overlay, from `0.0` to `1.0`. |
 | `--analysis-max-distance` | `0.08` | Maximum OKLab perpendicular distance from a dry-to-wet colour line before an analysis hex is treated as an unrelated colour change and shown with the checker texture. |
 | `--analysis-time-window` | `5.0` | Seconds of video to accumulate into an averaged source frame before projecting hex wetness. Use `0` to disable temporal averaging. |
 | `--hex-size` | `40` | Hex cell radius in original video pixels for interactive analysis and batch processing. |
-| `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. |
+| `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. Cannot be combined with `--live-stream`. |
+| `--live-stream` | Off | Play the input video in an OpenCV window with the analysis hex overlay at the source FPS. Requires `--load-dir` and cannot be combined with `--process-video`. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
 | `--brush-size` | `20` | Initial brush radius in original video pixels. |
 | `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |

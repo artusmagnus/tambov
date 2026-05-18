@@ -206,6 +206,11 @@ def parse_args() -> argparse.Namespace:
         help="Process the entire video with the analysis hex overlay using masks loaded from --load-dir.",
     )
     parser.add_argument(
+        "--live-stream",
+        action="store_true",
+        help="Play the input video like a live stream with the analysis hex overlay using masks loaded from --load-dir.",
+    )
+    parser.add_argument(
         "--output-video",
         type=Path,
         help="Output video path for --process-video. Defaults to <out-dir>/<video>_hex_overlay.mp4.",
@@ -316,6 +321,29 @@ class TemporalFrameAverager:
         self._drop_before(start_index)
         if self.accumulator is None or not self.frames:
             return fallback_frame
+        return np.clip(self.accumulator / len(self.frames), 0, 255).astype(np.uint8)
+
+
+class LiveFrameAverager:
+    def __init__(self, state: EditorState) -> None:
+        self.window_frames = max(0, int(round(state.analysis_time_window * (state.fps if state.fps > 0 else 30.0))))
+        self.frames: deque[tuple[int, np.ndarray]] = deque()
+        self.accumulator: np.ndarray | None = None
+
+    def average_for_frame(self, frame_index: int, frame: np.ndarray) -> np.ndarray:
+        if self.window_frames <= 0:
+            return frame
+
+        if self.accumulator is None:
+            self.accumulator = np.zeros_like(frame, dtype=np.float32)
+        self.accumulator += frame.astype(np.float32)
+        self.frames.append((frame_index, frame))
+
+        oldest_allowed = max(0, frame_index - self.window_frames + 1)
+        while self.frames and self.frames[0][0] < oldest_allowed:
+            _old_frame_index, old_frame = self.frames.popleft()
+            self.accumulator -= old_frame.astype(np.float32)
+
         return np.clip(self.accumulator / len(self.frames), 0, 255).astype(np.uint8)
 
 
@@ -1129,6 +1157,50 @@ def process_video_with_analysis_overlay(
     return 0
 
 
+def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.VideoCapture) -> int:
+    if not state.condition_masks_by_frame:
+        raise RuntimeError("No mask annotations are loaded; pass --load-dir with saved mask PNGs.")
+
+    state.scale = 1.0
+    state.hex_enabled = True
+    state.analysis_enabled = False
+    run_wetness_analysis(state, capture)
+    if not state.analysis_enabled:
+        raise RuntimeError("Cannot play live stream because wetness analysis found no dry/wet hex models.")
+
+    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    stream_window_name = "wet/dry floor live analysis"
+    cv2.namedWindow(stream_window_name, cv2.WINDOW_NORMAL)
+    frame_delay_ms = max(1, int(round(1000.0 / (state.fps if state.fps > 0 else 30.0))))
+    live_averager = LiveFrameAverager(state)
+    empty_condition_masks = make_empty_condition_masks(state)
+    processed_frames = 0
+
+    while True:
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            break
+
+        state.frame_index = processed_frames
+        frame_masks = state.condition_masks_by_frame.get(processed_frames, empty_condition_masks)
+        state.current_condition_frame = processed_frames
+        for label in CONDITION_LABELS:
+            state.masks[label] = frame_masks[label]
+
+        analysis_sample_frame = live_averager.average_for_frame(processed_frames, frame)
+        output_frame = make_analysis_video_frame(state, frame, analysis_sample_frame)
+        cv2.imshow(stream_window_name, output_frame)
+        key = cv2.waitKey(frame_delay_ms) & 0xFF
+        if key in (ord("q"), 27):
+            break
+
+        processed_frames += 1
+
+    cv2.destroyWindow(stream_window_name)
+    print(f"Played {processed_frames} live-stream frame(s).")
+    return 0
+
+
 def make_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     if view.overlay is not None and not state.render_dirty:
         return view.overlay
@@ -1272,8 +1344,12 @@ def main() -> int:
         raise ValueError("--brush-size must be greater than 0.")
     if args.hex_size <= 0:
         raise ValueError("--hex-size must be greater than 0.")
+    if args.process_video and args.live_stream:
+        raise ValueError("--process-video and --live-stream cannot be used together.")
     if args.process_video and not args.load_dir:
         raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
+    if args.live_stream and not args.load_dir:
+        raise ValueError("--live-stream requires --load-dir so masks can be reconstructed.")
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.analysis_time_window < 0:
@@ -1290,7 +1366,7 @@ def main() -> int:
     frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = float(capture.get(cv2.CAP_PROP_FPS))
 
-    if args.process_video:
+    if args.process_video or args.live_stream:
         args.scale = 1.0
     elif args.max_display_width and width > args.max_display_width:
         args.scale = min(args.scale, args.max_display_width / width)
@@ -1324,6 +1400,13 @@ def main() -> int:
             return process_video_with_analysis_overlay(state, capture, args.output_video)
         finally:
             capture.release()
+
+    if args.live_stream:
+        try:
+            return play_live_stream_with_analysis_overlay(state, capture)
+        finally:
+            capture.release()
+            cv2.destroyAllWindows()
 
     print(HELP_TEXT)
     window_name = "wet/dry floor brush mask mapper"
