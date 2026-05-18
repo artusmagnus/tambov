@@ -28,6 +28,32 @@ You can choose the reference frame with the horizontal slider before painting. F
 python -m pip install -r requirements.txt
 ```
 
+### Quick command examples
+
+**Case 1: create or edit annotations interactively** with `mask_annotator.py`:
+
+```bash
+# Start a new annotation folder from a calibration video.
+python mask_annotator.py /path/to/calibration_video.mp4 --out-dir mask_output
+
+# Reopen/edit an existing annotation folder.
+python mask_annotator.py /path/to/calibration_video.mp4 --load-dir mask_output --out-dir mask_output
+```
+
+**Case 2: run analysis from saved annotations** with `mask_mapper.py`:
+
+```bash
+# Process a whole video and write an output overlay video.
+python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --output-video wetness_overlay.mp4
+
+# Play a live RTSP stream using saved annotations/model inputs.
+python mask_mapper.py \
+  --stream 'rtsp://user:password@192.168.1.52/axis-media/media.amp' \
+  --live-stream \
+  --load-dir mask_output \
+  --average-wetness-only
+```
+
 ### Annotate
 
 ```bash
