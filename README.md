@@ -65,6 +65,22 @@ If `--output-video` is omitted, the processed video is written to `<out-dir>/<vi
 python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output --hex-size 30
 ```
 
+### Command-line flags
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `video` | Required | Path to the input video file. |
+| `--out-dir` | `mask_output` | Directory where saved mask PNGs are written. Batch mode also uses it for the default output video path. |
+| `--load-dir` | Not set | Reconstruct a prior annotation session by scanning this directory for saved mask PNGs. Required with `--process-video`. |
+| `--scale` | `1.0` | Interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `--process-video`, which renders at full resolution. |
+| `--alpha` | `0.45` | Opacity for the regular mask-color overlay, from `0.0` to `1.0`. |
+| `--analysis-max-distance` | `0.08` | Maximum OKLab perpendicular distance from a dry-to-wet colour line before an analysis hex is treated as an unrelated colour change and shown with the checker texture. |
+| `--hex-size` | `40` | Hex cell radius in original video pixels for interactive analysis and batch processing. |
+| `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. |
+| `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
+| `--brush-size` | `20` | Initial brush radius in original video pixels. |
+| `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
+
 ### Controls
 
 | Action | Control |
