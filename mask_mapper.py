@@ -16,6 +16,7 @@ they are drawn.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import time
 from collections import deque
@@ -123,6 +124,7 @@ class EditorState:
     live_analysis_interval: float
     live_target_fps: float | None
     stream_reconnect_delay: float
+    rtsp_transport: str
     is_live_source: bool
     show_hex_values: bool
     average_wetness_only: bool
@@ -298,6 +300,15 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait before reopening a failed live source read.",
     )
     parser.add_argument(
+        "--rtsp-transport",
+        choices=("tcp", "udp", "udp_multicast", "http", "auto"),
+        default="tcp",
+        help=(
+            "RTSP transport passed to OpenCV/FFmpeg through OPENCV_FFMPEG_CAPTURE_OPTIONS. "
+            "The default tcp avoids many camera SETUP failures; use auto to leave OpenCV defaults untouched."
+        ),
+    )
+    parser.add_argument(
         "--analysis-source",
         help=(
             "Optional seekable video source used to build the dry-to-wet model before "
@@ -346,10 +357,48 @@ def source_capture_value(source: str) -> str | int:
     return source
 
 
-def open_capture(source: str) -> cv2.VideoCapture:
-    capture = cv2.VideoCapture(source_capture_value(source))
+def rtsp_transport_option(source: str, transport: str) -> str | None:
+    if transport == "auto" or urlparse(source).scheme.lower() != "rtsp":
+        return None
+    return f"rtsp_transport;{transport}"
+
+
+def ffmpeg_capture_options_with_rtsp_transport(source: str, transport: str) -> str | None:
+    transport_option = rtsp_transport_option(source, transport)
+    if transport_option is None:
+        return None
+
+    existing_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+    if "rtsp_transport" in existing_options:
+        return None
+    if not existing_options:
+        return transport_option
+    return f"{existing_options}|{transport_option}"
+
+
+def open_capture(source: str, rtsp_transport: str = "tcp") -> cv2.VideoCapture:
+    ffmpeg_options = ffmpeg_capture_options_with_rtsp_transport(source, rtsp_transport)
+    previous_ffmpeg_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+    if ffmpeg_options is not None:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
+
+    try:
+        capture = cv2.VideoCapture(source_capture_value(source))
+    finally:
+        if ffmpeg_options is not None:
+            if previous_ffmpeg_options is None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_ffmpeg_options
+
     if not capture.isOpened():
-        raise RuntimeError(f"Could not open source: {source}")
+        hint = ""
+        if urlparse(source).scheme.lower() == "rtsp":
+            hint = (
+                f" (tried RTSP transport {rtsp_transport!r}; if the camera rejects SETUP, "
+                "try --rtsp-transport udp or --rtsp-transport auto)"
+            )
+        raise RuntimeError(f"Could not open source: {source}{hint}")
     return capture
 
 
@@ -1431,7 +1480,7 @@ def process_video_with_analysis_overlay(
     temporal_averager: TemporalFrameAverager | None = None
     if analysis_window_radius_frames(state) > 0:
         try:
-            sample_capture = open_capture(state.source)
+            sample_capture = open_capture(state.source, state.rtsp_transport)
         except RuntimeError:
             writer.release()
             raise
@@ -1529,7 +1578,7 @@ def play_live_stream_with_analysis_overlay(
             capture.release()
             time.sleep(state.stream_reconnect_delay)
             try:
-                capture = open_capture(state.source)
+                capture = open_capture(state.source, state.rtsp_transport)
             except RuntimeError as error:
                 print(f"[stream] reconnect failed: {error}")
                 time.sleep(state.stream_reconnect_delay)
@@ -1738,7 +1787,7 @@ def main() -> int:
     source = args.source
     mask_stem_source = args.analysis_source if args.live_stream and args.analysis_source else source
     source_stem = source_name_stem(mask_stem_source)
-    capture = open_capture(source)
+    capture = open_capture(source, args.rtsp_transport)
 
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1772,6 +1821,7 @@ def main() -> int:
         live_analysis_interval=args.live_analysis_interval,
         live_target_fps=args.fps,
         stream_reconnect_delay=args.stream_reconnect_delay,
+        rtsp_transport=args.rtsp_transport,
         is_live_source=is_live_source,
         show_hex_values=args.show_hex_values,
         average_wetness_only=args.average_wetness_only,
@@ -1796,7 +1846,7 @@ def main() -> int:
 
     if args.live_stream:
         analysis_source = args.analysis_source or source
-        analysis_capture = open_capture(analysis_source)
+        analysis_capture = open_capture(analysis_source, args.rtsp_transport)
         try:
             return play_live_stream_with_analysis_overlay(state, capture, analysis_capture)
         finally:
