@@ -117,6 +117,7 @@ class EditorState:
     analysis_time_window: float
     analysis_sample_interval: float
     live_analysis_interval: float
+    show_hex_values: bool
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"
@@ -131,6 +132,8 @@ class EditorState:
     hex_cells: list[HexCell] = field(default_factory=list)
     floor_hex_cells_cache_key: tuple[int, int, int, int, int] | None = None
     floor_hex_cells: list[HexCell] = field(default_factory=list)
+    display_polygons_cache_key: tuple[int, int, int, float] | None = None
+    display_polygons: dict[int, np.ndarray] = field(default_factory=dict)
     is_painting: bool = False
     cursor: tuple[int, int] | None = None
     last_paint_point: tuple[int, int] | None = None
@@ -222,6 +225,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=40,
         help="Hex cell radius in original video pixels for analysis and batch video processing.",
+    )
+    parser.add_argument(
+        "--show-hex-values",
+        action="store_true",
+        help="Draw numeric wetness values inside analysis hexes. Disabled by default for faster rendering.",
     )
     parser.add_argument(
         "--process-video",
@@ -904,6 +912,7 @@ def get_hex_cells(state: EditorState) -> list[HexCell]:
         state.hex_cells = build_hex_cells(state.width, state.height, radius)
         state.hex_cells_cache_key = cache_key
         state.floor_hex_cells_cache_key = None
+        state.display_polygons_cache_key = None
     return state.hex_cells
 
 
@@ -929,6 +938,18 @@ def iter_visible_hex_cells(state: EditorState) -> list[HexCell]:
         return get_floor_hex_cells(state)
     selected_mask = state.masks[state.selected]
     return [cell for cell in get_hex_cells(state) if cell_overlaps_mask(selected_mask, cell)]
+
+
+def get_display_polygon(state: EditorState, cell: HexCell) -> np.ndarray:
+    radius = max(1, state.hex_cell_size)
+    cache_key = (state.width, state.height, radius, state.scale)
+    if state.display_polygons_cache_key != cache_key:
+        state.display_polygons = {
+            hex_cell.index: np.round(hex_cell.polygon * state.scale).astype(np.int32)
+            for hex_cell in get_hex_cells(state)
+        }
+        state.display_polygons_cache_key = cache_key
+    return state.display_polygons[cell.index]
 
 
 def collect_hex_color_samples(
@@ -1088,7 +1109,7 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         if average_color is None:
             continue
 
-        display_polygon = np.round(cell.polygon * state.scale).astype(np.int32)
+        display_polygon = get_display_polygon(state, cell)
         wetness_text: str | None = None
         if state.analysis_enabled:
             if cell.index not in state.wetness_models:
@@ -1106,7 +1127,7 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
                 continue
             wetness_values.append(wetness_value)
             color = wetness_to_bgr(wetness_value)
-            if state.hex_cell_size * state.scale >= 18:
+            if state.show_hex_values and state.hex_cell_size * state.scale >= 18:
                 wetness_text = f"{wetness_value:.0f}"
         else:
             color = tuple(int(channel) for channel in average_color)
@@ -1520,6 +1541,7 @@ def main() -> int:
         analysis_time_window=args.analysis_time_window,
         analysis_sample_interval=args.analysis_sample_interval,
         live_analysis_interval=args.live_analysis_interval,
+        show_hex_values=args.show_hex_values,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
