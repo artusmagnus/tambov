@@ -107,6 +107,7 @@ class EditorState:
     alpha: float
     analysis_max_distance: float
     analysis_time_window: float
+    live_analysis_interval: float
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"
@@ -209,6 +210,15 @@ def parse_args() -> argparse.Namespace:
         "--live-stream",
         action="store_true",
         help="Play the input video like a live stream with the analysis hex overlay using masks loaded from --load-dir.",
+    )
+    parser.add_argument(
+        "--live-analysis-interval",
+        type=float,
+        default=1.0,
+        help=(
+            "Seconds between live-stream analysis overlay recalculations. "
+            "Use 0 to recalculate on every frame."
+        ),
     )
     parser.add_argument(
         "--output-video",
@@ -1084,6 +1094,22 @@ def make_analysis_video_frame(
     return output_frame
 
 
+def render_analysis_overlay_from_cache(
+    frame: np.ndarray,
+    hex_overlay: np.ndarray | None,
+    hex_mask: np.ndarray | None,
+    average_wetness: float | None,
+) -> np.ndarray:
+    output_frame = frame.copy()
+    if hex_overlay is not None and hex_mask is not None:
+        hex_pixels = hex_mask > 0
+        blended_hex = cv2.addWeighted(hex_overlay, 0.2, frame, 0.8, 0)
+        output_frame[hex_pixels] = blended_hex[hex_pixels]
+    if average_wetness is not None:
+        draw_top_right_label(output_frame, f"Avg wetness: {average_wetness:.0f}")
+    return output_frame
+
+
 def default_output_video_path(state: EditorState) -> Path:
     return state.out_dir / f"{state.video_path.stem}_hex_overlay.mp4"
 
@@ -1157,6 +1183,13 @@ def process_video_with_analysis_overlay(
     return 0
 
 
+def live_analysis_interval_frames(state: EditorState) -> int:
+    if state.live_analysis_interval <= 0:
+        return 1
+    fps = state.fps if state.fps > 0 else 30.0
+    return max(1, int(round(state.live_analysis_interval * fps)))
+
+
 def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.VideoCapture) -> int:
     if not state.condition_masks_by_frame:
         raise RuntimeError("No mask annotations are loaded; pass --load-dir with saved mask PNGs.")
@@ -1171,9 +1204,14 @@ def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.Vide
     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
     stream_window_name = "wet/dry floor live analysis"
     cv2.namedWindow(stream_window_name, cv2.WINDOW_NORMAL)
-    frame_delay_ms = max(1, int(round(1000.0 / (state.fps if state.fps > 0 else 30.0))))
+    fps = state.fps if state.fps > 0 else 30.0
+    frame_delay_ms = max(1, int(round(1000.0 / fps)))
+    analysis_interval_frames = live_analysis_interval_frames(state)
     live_averager = LiveFrameAverager(state)
     empty_condition_masks = make_empty_condition_masks(state)
+    cached_hex_overlay: np.ndarray | None = None
+    cached_hex_mask: np.ndarray | None = None
+    cached_average_wetness: float | None = None
     processed_frames = 0
 
     while True:
@@ -1188,7 +1226,16 @@ def play_live_stream_with_analysis_overlay(state: EditorState, capture: cv2.Vide
             state.masks[label] = frame_masks[label]
 
         analysis_sample_frame = live_averager.average_for_frame(processed_frames, frame)
-        output_frame = make_analysis_video_frame(state, frame, analysis_sample_frame)
+        should_recalculate = processed_frames % analysis_interval_frames == 0 or cached_hex_overlay is None
+        if should_recalculate:
+            view = FrameView(frame=frame, display_frame=frame.copy(), analysis_sample_frame=analysis_sample_frame)
+            cached_hex_overlay = make_hex_overlay(state, view)
+            cached_hex_mask = view.hex_mask
+            cached_average_wetness = view.analysis_average_wetness
+
+        output_frame = render_analysis_overlay_from_cache(
+            frame, cached_hex_overlay, cached_hex_mask, cached_average_wetness
+        )
         cv2.imshow(stream_window_name, output_frame)
         key = cv2.waitKey(frame_delay_ms) & 0xFF
         if key in (ord("q"), 27):
@@ -1354,6 +1401,8 @@ def main() -> int:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.analysis_time_window < 0:
         raise ValueError("--analysis-time-window must be 0 or greater.")
+    if args.live_analysis_interval < 0:
+        raise ValueError("--live-analysis-interval must be 0 or greater.")
     if args.max_display_width < 0:
         raise ValueError("--max-display-width must be 0 or greater.")
 
@@ -1383,6 +1432,7 @@ def main() -> int:
         alpha=args.alpha,
         analysis_max_distance=args.analysis_max_distance,
         analysis_time_window=args.analysis_time_window,
+        live_analysis_interval=args.live_analysis_interval,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},

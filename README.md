@@ -67,13 +67,13 @@ python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output 
 
 ### Play as a live stream
 
-To review the same analysis overlay without writing a file, play the input video like a live stream. The stream uses the saved masks, runs the analysis once, displays frames at the source FPS, and applies temporal averaging only over frames that have already arrived:
+To review the same analysis overlay without writing a file, play the input video like a live stream. The stream uses the saved masks, builds the dry-to-wet model once, displays frames at the source FPS, applies temporal averaging only over frames that have already arrived, and recalculates the displayed analysis overlay once per second by default:
 
 ```bash
 python mask_mapper.py /path/to/video.mp4 --live-stream --load-dir mask_output
 ```
 
-Press `q` or Esc to stop the live stream window.
+Use `--live-analysis-interval` to control how often the live overlay is recalculated; for example, `0.5` updates twice per second, and `0` updates on every frame. Press `q` or Esc to stop the live stream window.
 
 ### Command-line flags
 
@@ -89,6 +89,7 @@ Press `q` or Esc to stop the live stream window.
 | `--hex-size` | `40` | Hex cell radius in original video pixels for interactive analysis and batch processing. |
 | `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. Cannot be combined with `--live-stream`. |
 | `--live-stream` | Off | Play the input video in an OpenCV window with the analysis hex overlay at the source FPS. Requires `--load-dir` and cannot be combined with `--process-video`. |
+| `--live-analysis-interval` | `1.0` | Seconds between live-stream analysis overlay recalculations. Use `0` to recalculate on every frame. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
 | `--brush-size` | `20` | Initial brush radius in original video pixels. |
 | `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
