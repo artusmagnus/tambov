@@ -107,6 +107,7 @@ class EditorState:
     alpha: float
     analysis_max_distance: float
     analysis_time_window: float
+    analysis_sample_interval: float
     live_analysis_interval: float
     frame_index: int = 0
     selected: str = "floor"
@@ -196,6 +197,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--analysis-sample-interval",
+        type=float,
+        default=1.0,
+        help=(
+            "Seconds between frames sampled into each temporal analysis average. "
+            "Use 0 to sample every frame."
+        ),
+    )
+    parser.add_argument(
         "--hex-size",
         type=int,
         default=40,
@@ -263,6 +273,19 @@ def analysis_window_radius_frames(state: EditorState) -> int:
     return max(0, int(round(state.analysis_time_window * fps / 2.0)))
 
 
+def analysis_sample_interval_frames(state: EditorState) -> int:
+    if state.analysis_sample_interval <= 0:
+        return 1
+    fps = state.fps if state.fps > 0 else 30.0
+    return max(1, int(round(state.analysis_sample_interval * fps)))
+
+
+def first_sample_index_in_range(start_index: int, interval_frames: int) -> int:
+    if interval_frames <= 1:
+        return start_index
+    return start_index + ((interval_frames - (start_index % interval_frames)) % interval_frames)
+
+
 def read_temporal_average_frame(
     capture: cv2.VideoCapture,
     state: EditorState,
@@ -278,9 +301,11 @@ def read_temporal_average_frame(
     else:
         start_index = max(0, frame_index - radius)
         end_index = frame_index + radius
+    interval_frames = analysis_sample_interval_frames(state)
+    first_sample_index = first_sample_index_in_range(start_index, interval_frames)
     accumulator = np.zeros((state.height, state.width, 3), dtype=np.float64)
     frame_total = 0
-    for sample_index in range(start_index, end_index + 1):
+    for sample_index in range(first_sample_index, end_index + 1, interval_frames):
         accumulator += read_frame(capture, sample_index).astype(np.float64)
         frame_total += 1
 
@@ -294,6 +319,7 @@ class TemporalFrameAverager:
         self.state = state
         self.capture = capture
         self.radius = analysis_window_radius_frames(state)
+        self.interval_frames = analysis_sample_interval_frames(state)
         self.next_frame_index = 0
         self.frames: deque[tuple[int, np.ndarray]] = deque()
         self.accumulator: np.ndarray | None = None
@@ -325,7 +351,8 @@ class TemporalFrameAverager:
             ok, frame = self.capture.read()
             if not ok or frame is None:
                 break
-            self._append_frame(self.next_frame_index, frame)
+            if self.next_frame_index % self.interval_frames == 0:
+                self._append_frame(self.next_frame_index, frame)
             self.next_frame_index += 1
 
         self._drop_before(start_index)
@@ -337,6 +364,7 @@ class TemporalFrameAverager:
 class LiveFrameAverager:
     def __init__(self, state: EditorState) -> None:
         self.window_frames = max(0, int(round(state.analysis_time_window * (state.fps if state.fps > 0 else 30.0))))
+        self.interval_frames = analysis_sample_interval_frames(state)
         self.frames: deque[tuple[int, np.ndarray]] = deque()
         self.accumulator: np.ndarray | None = None
 
@@ -344,16 +372,19 @@ class LiveFrameAverager:
         if self.window_frames <= 0:
             return frame
 
-        if self.accumulator is None:
-            self.accumulator = np.zeros_like(frame, dtype=np.float32)
-        self.accumulator += frame.astype(np.float32)
-        self.frames.append((frame_index, frame))
+        if frame_index % self.interval_frames == 0:
+            if self.accumulator is None:
+                self.accumulator = np.zeros_like(frame, dtype=np.float32)
+            self.accumulator += frame.astype(np.float32)
+            self.frames.append((frame_index, frame))
 
         oldest_allowed = max(0, frame_index - self.window_frames + 1)
         while self.frames and self.frames[0][0] < oldest_allowed:
             _old_frame_index, old_frame = self.frames.popleft()
             self.accumulator -= old_frame.astype(np.float32)
 
+        if self.accumulator is None or not self.frames:
+            return frame
         return np.clip(self.accumulator / len(self.frames), 0, 255).astype(np.uint8)
 
 
@@ -1401,6 +1432,8 @@ def main() -> int:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.analysis_time_window < 0:
         raise ValueError("--analysis-time-window must be 0 or greater.")
+    if args.analysis_sample_interval < 0:
+        raise ValueError("--analysis-sample-interval must be 0 or greater.")
     if args.live_analysis_interval < 0:
         raise ValueError("--live-analysis-interval must be 0 or greater.")
     if args.max_display_width < 0:
@@ -1432,6 +1465,7 @@ def main() -> int:
         alpha=args.alpha,
         analysis_max_distance=args.analysis_max_distance,
         analysis_time_window=args.analysis_time_window,
+        analysis_sample_interval=args.analysis_sample_interval,
         live_analysis_interval=args.live_analysis_interval,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
