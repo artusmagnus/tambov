@@ -105,6 +105,7 @@ class EditorState:
     scale: float
     alpha: float
     analysis_max_distance: float
+    analysis_time_window: float
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"
@@ -141,6 +142,7 @@ class FrameView:
     hex_overlay: np.ndarray | None = None
     hex_mask: np.ndarray | None = None
     hex_cache_key: tuple[int, str, int, int, int, int] | None = None
+    analysis_sample_frame: np.ndarray | None = None
     analysis_average_wetness: float | None = None
     suppress_trackbar_callback: bool = False
 
@@ -180,6 +182,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Maximum OKLab perpendicular distance from a dry-to-wet colour line "
             "before a hex is treated as an unrelated colour change."
+        ),
+    )
+    parser.add_argument(
+        "--analysis-time-window",
+        type=float,
+        default=5.0,
+        help=(
+            "Seconds of video to average for each analysed frame before projecting hex wetness. "
+            "Use 0 to disable temporal averaging."
         ),
     )
     parser.add_argument(
@@ -231,6 +242,49 @@ def read_frame(capture: cv2.VideoCapture, index: int) -> np.ndarray:
 
 
 
+def analysis_window_radius_frames(state: EditorState) -> int:
+    fps = state.fps if state.fps > 0 else 30.0
+    return max(0, int(round(state.analysis_time_window * fps / 2.0)))
+
+
+def read_temporal_average_frame(
+    capture: cv2.VideoCapture,
+    state: EditorState,
+    frame_index: int,
+) -> np.ndarray:
+    radius = analysis_window_radius_frames(state)
+    if radius <= 0:
+        return read_frame(capture, frame_index)
+
+    start_index = clamp_frame(frame_index - radius, state.frame_count)
+    end_index = clamp_frame(frame_index + radius, state.frame_count)
+    accumulator = np.zeros((state.height, state.width, 3), dtype=np.float64)
+    frame_total = 0
+    for sample_index in range(start_index, end_index + 1):
+        accumulator += read_frame(capture, sample_index).astype(np.float64)
+        frame_total += 1
+
+    if frame_total == 0:
+        return read_frame(capture, frame_index)
+    return np.clip(accumulator / frame_total, 0, 255).astype(np.uint8)
+
+
+def update_analysis_sample_frame(
+    state: EditorState,
+    view: FrameView,
+    capture: cv2.VideoCapture,
+) -> None:
+    if not state.analysis_enabled:
+        view.analysis_sample_frame = None
+        return
+    view.analysis_sample_frame = read_temporal_average_frame(capture, state, state.frame_index)
+    view.hex_overlay = None
+    view.hex_mask = None
+    view.hex_cache_key = None
+    view.analysis_average_wetness = None
+    state.render_dirty = True
+
+
 def make_display_frame(frame: np.ndarray, state: EditorState) -> np.ndarray:
     if state.scale == 1.0:
         return frame.copy()
@@ -245,6 +299,7 @@ def set_frame_view_frame(view: FrameView, state: EditorState, frame: np.ndarray)
     view.hex_overlay = None
     view.hex_mask = None
     view.hex_cache_key = None
+    view.analysis_sample_frame = None
     view.analysis_average_wetness = None
     state.render_dirty = True
 
@@ -487,6 +542,7 @@ def set_frame(
     state.frame_index = clamp_frame(index, state.frame_count)
     bind_condition_masks_to_frame(state, state.frame_index)
     set_frame_view_frame(view, state, read_frame(capture, state.frame_index))
+    update_analysis_sample_frame(state, view, capture)
     view.suppress_trackbar_callback = True
     cv2.setTrackbarPos("Frame", window_name, state.frame_index)
     view.suppress_trackbar_callback = False
@@ -831,13 +887,14 @@ def fill_missing_hex_texture(hex_overlay: np.ndarray, display_polygon: np.ndarra
 
 def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     layer_key = "analysis_floor" if state.analysis_enabled else state.selected
+    sample_frame = view.analysis_sample_frame if state.analysis_enabled and view.analysis_sample_frame is not None else view.frame
     cache_key = (
         state.frame_index,
         layer_key,
         state.hex_cell_size,
         state.mask_revision,
         state.analysis_revision if state.analysis_enabled else 0,
-        id(view.frame),
+        id(sample_frame),
     )
     if view.hex_overlay is not None and view.hex_cache_key == cache_key:
         return view.hex_overlay
@@ -855,7 +912,7 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         if not polygon_overlaps_mask(source_mask, polygon, bounds):
             continue
 
-        average_color = average_bgr_in_polygon(view.frame, polygon, bounds)
+        average_color = average_bgr_in_polygon(sample_frame, polygon, bounds)
         if average_color is None:
             continue
 
@@ -933,8 +990,12 @@ def draw_analysis_average_wetness(frame: np.ndarray, view: FrameView, top: int =
         draw_top_right_label(frame, f"Avg wetness: {view.analysis_average_wetness:.0f}", top)
 
 
-def make_analysis_video_frame(state: EditorState, frame: np.ndarray) -> np.ndarray:
-    view = FrameView(frame=frame, display_frame=frame.copy())
+def make_analysis_video_frame(
+    state: EditorState,
+    frame: np.ndarray,
+    analysis_sample_frame: np.ndarray | None = None,
+) -> np.ndarray:
+    view = FrameView(frame=frame, display_frame=frame.copy(), analysis_sample_frame=analysis_sample_frame)
     hex_overlay = make_hex_overlay(state, view)
     output_frame = frame.copy()
     if view.hex_mask is not None:
@@ -971,6 +1032,11 @@ def process_video_with_analysis_overlay(
     if not writer.isOpened():
         raise RuntimeError(f"Could not open output video for writing: {output_path}")
 
+    sample_capture = cv2.VideoCapture(str(state.video_path))
+    if not sample_capture.isOpened():
+        writer.release()
+        raise RuntimeError(f"Could not open video for temporal analysis sampling: {state.video_path}")
+
     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
     processed_frames = 0
     total_frames = max(state.frame_count, 0)
@@ -986,7 +1052,8 @@ def process_video_with_analysis_overlay(
             state.current_condition_frame = processed_frames
             for label in CONDITION_LABELS:
                 state.masks[label] = frame_masks[label]
-            output_frame = make_analysis_video_frame(state, frame)
+            analysis_sample_frame = read_temporal_average_frame(sample_capture, state, processed_frames)
+            output_frame = make_analysis_video_frame(state, frame, analysis_sample_frame)
             writer.write(output_frame)
             processed_frames += 1
 
@@ -996,6 +1063,7 @@ def process_video_with_analysis_overlay(
                 else:
                     print(f"Processed {processed_frames} frames...")
     finally:
+        sample_capture.release()
         writer.release()
 
     print(f"Wrote analysis hex overlay video with {processed_frames} frame(s) to: {output_path.resolve()}")
@@ -1082,6 +1150,7 @@ def make_trackbar_callback(
         state.frame_index = clamp_frame(position, state.frame_count)
         bind_condition_masks_to_frame(state, state.frame_index)
         set_frame_view_frame(view, state, read_frame(capture, state.frame_index))
+        update_analysis_sample_frame(state, view, capture)
         state.is_painting = False
 
     return on_frame_slider
@@ -1148,6 +1217,8 @@ def main() -> int:
         raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
+    if args.analysis_time_window < 0:
+        raise ValueError("--analysis-time-window must be 0 or greater.")
     if args.max_display_width < 0:
         raise ValueError("--max-display-width must be 0 or greater.")
 
@@ -1176,6 +1247,7 @@ def main() -> int:
         scale=args.scale,
         alpha=args.alpha,
         analysis_max_distance=args.analysis_max_distance,
+        analysis_time_window=args.analysis_time_window,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
@@ -1224,6 +1296,7 @@ def main() -> int:
             print("Brush mode: erase")
         elif key in (10, 13):
             run_wetness_analysis(state, capture)
+            update_analysis_sample_frame(state, view, capture)
         elif key == ord(" "):
             toggle_hex_view(state)
         elif key in (ord("+"), ord("=")):

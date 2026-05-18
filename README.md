@@ -33,10 +33,10 @@ For smoother editing on large videos, the tool automatically limits the display 
 python mask_mapper.py /path/to/video.mp4 --scale 0.5 --brush-size 15 --out-dir mask_output
 ```
 
-Adjust the OKLab analysis rejection threshold if moving objects or lighting changes are being accepted/rejected too aggressively:
+Adjust the OKLab analysis rejection threshold if moving objects or lighting changes are being accepted/rejected too aggressively. Analysis reads each evaluated frame as a temporal average over a 5-second window by default to reduce short-lived interference; use `--analysis-time-window` to change the window, or `0` to disable temporal averaging:
 
 ```bash
-python mask_mapper.py /path/to/video.mp4 --analysis-max-distance 0.06 --out-dir mask_output
+python mask_mapper.py /path/to/video.mp4 --analysis-max-distance 0.06 --analysis-time-window 3 --out-dir mask_output
 ```
 
 Load a previous annotation session by passing the folder that contains the saved mask images. The loader reconstructs annotations from PNG filenames, so it does not need a JSON metadata file:
@@ -75,6 +75,7 @@ python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output 
 | `--scale` | `1.0` | Interactive display scale. Painting coordinates and saved masks still use original video resolution. Ignored by `--process-video`, which renders at full resolution. |
 | `--alpha` | `0.45` | Opacity for the regular mask-color overlay, from `0.0` to `1.0`. |
 | `--analysis-max-distance` | `0.08` | Maximum OKLab perpendicular distance from a dry-to-wet colour line before an analysis hex is treated as an unrelated colour change and shown with the checker texture. |
+| `--analysis-time-window` | `5.0` | Seconds of video to average for each analysed frame before projecting hex wetness. Use `0` to disable temporal averaging. |
 | `--hex-size` | `40` | Hex cell radius in original video pixels for interactive analysis and batch processing. |
 | `--process-video` | Off | Run non-interactive batch mode: load masks from `--load-dir`, build the analysis model, and write a full video with the analysis hex overlay. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
@@ -110,7 +111,7 @@ python mask_mapper.py /path/to/video.mp4 --process-video --load-dir mask_output 
 
 Press Space to toggle a hexagon visualization of the current frame. The frame is divided into a hexagon mesh, each visible hexagon is filled with the average color of the original image pixels inside that cell, and `+` / `-` changes the hex cell size while the view is enabled. Press `1`, `2`, `3`, or `4` to show hexagons only for the corresponding mask layer: floor, dry, wet, or obstruction. While hex view is enabled, the regular mask-color overlay is hidden and hexes are drawn 80% transparent over the original frame.
 
-Press Enter to run dry-to-wet analysis for the current hex cell size. The tool first finds hex cells that have both dry and wet examples somewhere in the annotated video, converts their average colors to OKLab, and treats the line from the dry color to the wet color as a 0-100 wetness axis. If another hex has only dry or only wet examples, the tool now keeps it usable by finding the closest same-state color among the fully paired hexes and borrowing that similar hex's missing counterpart color. After analysis, navigate to any frame to evaluate the persistent floor area, including frames that were not annotated. The analysis view ignores the active mask layer and shows modeled floor hexes, excluding any obstruction mask on the current frame, with red for dry-like cells near `0`, yellow for midrange cells near `50`, and green for wet-like cells near `100`. The average wetness value across all valid analysis hexes in the current frame is shown at the top right. Floor hexes that do not have a learned or inferred dry-to-wet model, or whose colour is too far from the OKLab dry-to-wet line, are shown with a pink/black checker texture as irrelevant/non-floor colour changes.
+Press Enter to run dry-to-wet analysis for the current hex cell size. The tool first finds hex cells that have both dry and wet examples somewhere in the annotated video, converts their average colors to OKLab, and treats the line from the dry color to the wet color as a 0-100 wetness axis. When analysis is displayed, each evaluated frame uses the average image values inside the configured `--analysis-time-window` so brief interference affects the result less. If another hex has only dry or only wet examples, the tool now keeps it usable by finding the closest same-state color among the fully paired hexes and borrowing that similar hex's missing counterpart color. After analysis, navigate to any frame to evaluate the persistent floor area, including frames that were not annotated. The analysis view ignores the active mask layer and shows modeled floor hexes, excluding any obstruction mask on the current frame, with red for dry-like cells near `0`, yellow for midrange cells near `50`, and green for wet-like cells near `100`. The average wetness value across all valid analysis hexes in the current frame is shown at the top right. Floor hexes that do not have a learned or inferred dry-to-wet model, or whose colour is too far from the OKLab dry-to-wet line, are shown with a pink/black checker texture as irrelevant/non-floor colour changes.
 
 ### Output files
 
