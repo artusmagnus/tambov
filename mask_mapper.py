@@ -312,7 +312,8 @@ def parse_args() -> argparse.Namespace:
         "--analysis-source",
         help=(
             "Optional seekable video source used to build the dry-to-wet model before "
-            "--live-stream reads from the live source. Defaults to the main source."
+            "--live-stream reads from the live source. Required when --live-stream reads "
+            "from an RTSP source, because saved masks do not contain source frame colours."
         ),
     )
     parser.add_argument(
@@ -1878,6 +1879,13 @@ def main() -> int:
         raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
     if args.live_stream and not args.load_dir:
         raise ValueError("--live-stream requires --load-dir so masks can be reconstructed.")
+    if args.live_stream and is_rtsp_source(args.source) and not args.analysis_source:
+        raise ValueError(
+            "--live-stream with an RTSP source requires --analysis-source pointing to the "
+            "seekable calibration video used to create the masks. The saved PNG masks are "
+            "binary labels only; the tool must sample the calibration video frames to rebuild "
+            "the dry-to-wet colour model before applying it to the live stream."
+        )
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.analysis_time_window < 0:

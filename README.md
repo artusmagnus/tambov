@@ -91,6 +91,7 @@ python mask_mapper.py \
   --analysis-max-distance 0.03 \
   --hex-size 20 \
   --analysis-time-window 10 \
+  --analysis-source /path/to/annotated_calibration_video.mp4 \
   --average-wetness-only \
   --use-opencl
 ```
@@ -99,7 +100,7 @@ Alternatively, escape the exclamation mark as `\!` or disable history expansion 
 
 For RTSP cameras, the tool forces OpenCV's FFmpeg backend to avoid image-sequence fallback warnings, and `--rtsp-transport auto` tries TCP, UDP, UDP multicast, HTTP tunneling, and finally OpenCV's default transport for the original URL, a trailing-slash URL, the URL-encoded-credentials variant, and that encoded variant with a trailing slash. If you still see an error such as `method SETUP failed: 500 Internal Server Error`, verify the camera URL/channel path and credentials in VLC or `ffplay`, then force the transport that works there with `--rtsp-transport tcp` or `--rtsp-transport udp`.
 
-For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
+For a true live source, use `--analysis-source` to point at the seekable annotated video that produced the masks in `--load-dir`. This is required for RTSP live streams because the saved PNG masks are binary labels only; the tool must sample the annotated calibration frames to rebuild the dry-to-wet colour model before applying it to current live frames. The live source is then used only for current frames, while the analysis source is used once to rebuild the saved dry-to-wet calibration model.
 
 #### How masks are used with a live stream
 
@@ -146,7 +147,7 @@ python mask_mapper.py \
 | `--fps` | Source FPS | Target processing/display FPS for `--live-stream`; lower values skip source frames with `VideoCapture.grab()`. |
 | `--stream-reconnect-delay` | `2.0` | Seconds to wait before reopening a failed live source read. Used for RTSP/HTTP/camera sources. |
 | `--rtsp-transport` | `auto` | RTSP transport passed to OpenCV/FFmpeg. `auto` tries `tcp`, `udp`, `udp_multicast`, `http`, then OpenCV's default across original/encoded/trailing-slash RTSP URL variants; set a specific transport if you know what the camera supports. |
-| `--analysis-source` | Main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. |
+| `--analysis-source` | Main source | Optional seekable video source used to build the dry-to-wet model before `--live-stream` reads from the live source. Required for RTSP live sources. |
 | `--output-video` | `<out-dir>/<video>_hex_overlay.mp4` | Output path for `--process-video`. |
 | `--brush-size` | `20` | Initial brush radius in original video pixels. |
 | `--max-display-width` | `1280` | Automatically downscale the interactive display window to this width for smoother editing. Use `0` to disable automatic downscaling. |
