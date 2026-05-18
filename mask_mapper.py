@@ -96,6 +96,14 @@ class HexWetnessModel:
 
 
 @dataclass
+class HexCell:
+    index: int
+    polygon: np.ndarray
+    bounds: tuple[int, int, int, int]
+    cell_pixels: np.ndarray
+
+
+@dataclass
 class EditorState:
     video_path: Path
     out_dir: Path
@@ -119,6 +127,8 @@ class EditorState:
     analysis_enabled: bool = False
     analysis_revision: int = 0
     wetness_models: dict[int, HexWetnessModel] = field(default_factory=dict)
+    hex_cells_cache_key: tuple[int, int, int] | None = None
+    hex_cells: list[HexCell] = field(default_factory=list)
     is_painting: bool = False
     cursor: tuple[int, int] | None = None
     last_paint_point: tuple[int, int] | None = None
@@ -809,23 +819,34 @@ def wetness_to_bgr(value: float) -> tuple[int, int, int]:
     return (0, green, red)
 
 
-def average_bgr_in_polygon(frame: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> np.ndarray | None:
+def make_cell_pixels(polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> np.ndarray:
     x0, y0, x1, y1 = bounds
     local_polygon = polygon - np.array([x0, y0], dtype=np.int32)
     cell_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
     cv2.fillPoly(cell_mask, [local_polygon], 255)
-    cell_pixels = cell_mask > 0
-    if not np.any(cell_pixels):
+    return cell_mask > 0
+
+
+def average_bgr_in_cell(frame: np.ndarray, cell: HexCell) -> np.ndarray | None:
+    x0, y0, x1, y1 = cell.bounds
+    if not np.any(cell.cell_pixels):
         return None
-    return frame[y0:y1, x0:x1][cell_pixels].mean(axis=0)
+    return frame[y0:y1, x0:x1][cell.cell_pixels].mean(axis=0)
+
+
+def cell_overlaps_mask(mask: np.ndarray, cell: HexCell) -> bool:
+    x0, y0, x1, y1 = cell.bounds
+    return bool(np.any(cell.cell_pixels & (mask[y0:y1, x0:x1] > 0)))
+
+
+def average_bgr_in_polygon(frame: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> np.ndarray | None:
+    cell = HexCell(index=0, polygon=polygon, bounds=bounds, cell_pixels=make_cell_pixels(polygon, bounds))
+    return average_bgr_in_cell(frame, cell)
 
 
 def polygon_overlaps_mask(mask: np.ndarray, polygon: np.ndarray, bounds: tuple[int, int, int, int]) -> bool:
-    x0, y0, x1, y1 = bounds
-    local_polygon = polygon - np.array([x0, y0], dtype=np.int32)
-    cell_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    cv2.fillPoly(cell_mask, [local_polygon], 255)
-    return bool(np.any((cell_mask > 0) & (mask[y0:y1, x0:x1] > 0)))
+    cell = HexCell(index=0, polygon=polygon, bounds=bounds, cell_pixels=make_cell_pixels(polygon, bounds))
+    return cell_overlaps_mask(mask, cell)
 
 
 def hexagon_points(center_x: float, center_y: float, radius: float) -> np.ndarray:
@@ -861,27 +882,46 @@ def polygon_bounds(polygon: np.ndarray, width: int, height: int) -> tuple[int, i
     return x0, y0, x1, y1
 
 
+def build_hex_cells(width: int, height: int, radius: int) -> list[HexCell]:
+    cells: list[HexCell] = []
+    for cell_index, polygon in enumerate(iter_hexagons(width, height, radius)):
+        bounds = polygon_bounds(polygon, width, height)
+        if bounds is None:
+            continue
+        cell_pixels = make_cell_pixels(polygon, bounds)
+        if not np.any(cell_pixels):
+            continue
+        cells.append(HexCell(index=cell_index, polygon=polygon, bounds=bounds, cell_pixels=cell_pixels))
+    return cells
+
+
+def get_hex_cells(state: EditorState) -> list[HexCell]:
+    radius = max(1, state.hex_cell_size)
+    cache_key = (state.width, state.height, radius)
+    if state.hex_cells_cache_key != cache_key:
+        state.hex_cells = build_hex_cells(state.width, state.height, radius)
+        state.hex_cells_cache_key = cache_key
+    return state.hex_cells
+
+
 def collect_hex_color_samples(
     state: EditorState,
     capture: cv2.VideoCapture,
 ) -> dict[int, dict[str, list[np.ndarray]]]:
     samples: dict[int, dict[str, list[np.ndarray]]] = {}
-    polygons = list(iter_hexagons(state.width, state.height, max(1, state.hex_cell_size)))
+    hex_cells = get_hex_cells(state)
     for frame_index, frame_masks in sorted(state.condition_masks_by_frame.items()):
         if not (np.any(frame_masks["dry"] > 0) or np.any(frame_masks["wet"] > 0)):
             continue
         frame = read_frame(capture, frame_index)
-        for cell_index, polygon in enumerate(polygons):
-            bounds = polygon_bounds(polygon, state.width, state.height)
-            if bounds is None:
-                continue
-            average_color = average_bgr_in_polygon(frame, polygon, bounds)
+        for cell in hex_cells:
+            average_color = average_bgr_in_cell(frame, cell)
             if average_color is None:
                 continue
-            cell_samples = samples.setdefault(cell_index, {"dry": [], "wet": []})
-            if polygon_overlaps_mask(frame_masks["dry"], polygon, bounds):
+            cell_samples = samples.setdefault(cell.index, {"dry": [], "wet": []})
+            if cell_overlaps_mask(frame_masks["dry"], cell):
                 cell_samples["dry"].append(bgr_to_oklab(average_color))
-            if polygon_overlaps_mask(frame_masks["wet"], polygon, bounds):
+            if cell_overlaps_mask(frame_masks["wet"], cell):
                 cell_samples["wet"].append(bgr_to_oklab(average_color))
     return samples
 
@@ -1022,29 +1062,25 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
     hex_mask = np.zeros(view.display_frame.shape[:2], dtype=np.uint8)
     wetness_values: list[float] = []
     source_mask = analysis_visibility_mask(state) if state.analysis_enabled else state.masks[state.selected]
-    radius = max(1, state.hex_cell_size)
 
-    for cell_index, polygon in enumerate(iter_hexagons(state.width, state.height, radius)):
-        bounds = polygon_bounds(polygon, state.width, state.height)
-        if bounds is None:
-            continue
-        if not polygon_overlaps_mask(source_mask, polygon, bounds):
+    for cell in get_hex_cells(state):
+        if not cell_overlaps_mask(source_mask, cell):
             continue
 
-        average_color = average_bgr_in_polygon(sample_frame, polygon, bounds)
+        average_color = average_bgr_in_cell(sample_frame, cell)
         if average_color is None:
             continue
 
-        display_polygon = np.round(polygon * state.scale).astype(np.int32)
+        display_polygon = np.round(cell.polygon * state.scale).astype(np.int32)
         wetness_text: str | None = None
         if state.analysis_enabled:
-            if cell_index not in state.wetness_models:
+            if cell.index not in state.wetness_models:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
                 cv2.fillPoly(hex_mask, [display_polygon], 255)
                 cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
                 continue
-            wetness_value, distance = project_onto_wetness_axis(state.wetness_models[cell_index], average_color)
+            wetness_value, distance = project_onto_wetness_axis(state.wetness_models[cell.index], average_color)
             if distance > state.analysis_max_distance:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
