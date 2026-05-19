@@ -1131,6 +1131,35 @@ def run_annotation_editor(state: EditorState, capture: cv2.VideoCapture) -> int:
 def main() -> int:
     args = parse_args()
 
+    if args.ui:
+        import settings_launcher
+        settings_launcher.launch_with_defaults({
+            "script": "mask_mapper.py",
+            "source": args.source,
+            "out_dir": str(args.out_dir),
+            "load_dir": str(args.load_dir) if args.load_dir else None,
+            "scale": args.scale,
+            "alpha": args.alpha,
+            "analysis_max_distance": args.analysis_max_distance,
+            "analysis_time_window": args.analysis_time_window,
+            "analysis_sample_interval": args.analysis_sample_interval,
+            "hex_size": args.hex_size,
+            "show_hex_values": args.show_hex_values,
+            "average_wetness_only": args.average_wetness_only,
+            "use_opencl": args.use_opencl,
+            "use_obstruction_colors": args.use_obstruction_colors,
+            "brush_size": args.brush_size,
+            "max_display_width": args.max_display_width,
+            "live_analysis_interval": args.live_analysis_interval,
+            "fps": args.fps if args.fps is not None else "",
+            "stream_reconnect_delay": args.stream_reconnect_delay,
+            "rtsp_transport": args.rtsp_transport,
+            "analysis_source": args.analysis_source,
+            "output_video": str(args.output_video) if args.output_video else None,
+            "mode": "process" if args.process_video else "live",
+        })
+        return 0
+
     global cv2, np
     import cv2 as cv2_module
     import numpy as np_module

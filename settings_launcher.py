@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 
 class Launcher(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, initial: dict[str, object] | None = None) -> None:
         super().__init__()
         self.title("Wet/Dry Mapper Launcher")
         self.geometry("760x740")
@@ -44,7 +44,60 @@ class Launcher(tk.Tk):
         self.use_obstruction_colors_var = tk.BooleanVar(value=False)
 
         self._build_ui()
+        self._apply_initial(initial or {})
         self._refresh_script_mode()
+
+
+    def _apply_initial(self, initial: dict[str, object]) -> None:
+        for key, value in initial.items():
+            if value is None:
+                continue
+            if key == "script":
+                self.script_var.set(str(value))
+            elif key == "source":
+                self.source_var.set(str(value))
+            elif key == "out_dir":
+                self.out_dir_var.set(str(value))
+            elif key == "load_dir":
+                self.load_dir_var.set(str(value))
+            elif key == "analysis_source":
+                self.analysis_source_var.set(str(value))
+            elif key == "output_video":
+                self.output_video_var.set(str(value))
+            elif key == "mode":
+                self.mode_var.set(str(value))
+            elif key == "rtsp_transport":
+                self.rtsp_transport_var.set(str(value))
+            elif key == "scale":
+                self.scale_var.set(float(value))
+            elif key == "alpha":
+                self.alpha_var.set(float(value))
+            elif key == "analysis_max_distance":
+                self.analysis_max_distance_var.set(float(value))
+            elif key == "analysis_time_window":
+                self.analysis_time_window_var.set(float(value))
+            elif key == "analysis_sample_interval":
+                self.analysis_sample_interval_var.set(float(value))
+            elif key == "hex_size":
+                self.hex_size_var.set(int(value))
+            elif key == "brush_size":
+                self.brush_size_var.set(int(value))
+            elif key == "max_display_width":
+                self.max_display_width_var.set(int(value))
+            elif key == "live_analysis_interval":
+                self.live_analysis_interval_var.set(float(value))
+            elif key == "fps":
+                self.fps_var.set(str(value))
+            elif key == "stream_reconnect_delay":
+                self.stream_reconnect_delay_var.set(float(value))
+            elif key == "show_hex_values":
+                self.show_hex_values_var.set(bool(value))
+            elif key == "average_wetness_only":
+                self.average_wetness_only_var.set(bool(value))
+            elif key == "use_opencl":
+                self.use_opencl_var.set(bool(value))
+            elif key == "use_obstruction_colors":
+                self.use_obstruction_colors_var.set(bool(value))
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
@@ -218,10 +271,14 @@ class Launcher(tk.Tk):
             messagebox.showerror("Run failed", str(exc))
 
 
-def main() -> int:
-    app = Launcher()
+def launch_with_defaults(initial: dict[str, object] | None = None) -> int:
+    app = Launcher(initial=initial)
     app.mainloop()
     return 0
+
+
+def main() -> int:
+    return launch_with_defaults()
 
 
 if __name__ == "__main__":

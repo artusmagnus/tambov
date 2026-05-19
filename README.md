@@ -241,3 +241,17 @@ Saving writes these images to `--out-dir`:
 ## Settings UI launcher
 
 Run `python settings_launcher.py` to open a small desktop UI where you can select `mask_annotator.py` or `mask_mapper.py`, configure flags/values, preview the command, and launch it.
+
+
+You can also open the same UI directly from the main scripts and prefill it from CLI values:
+
+```bash
+python mask_annotator.py --ui \
+  "/home/arm-068/Downloads/Tambov/Увлажнение пола/AS760.103_2026-5-12-8-6-59_2026-5-12-8-15-0.mp4" \
+  --load-dir /home/arm-068/Desktop/Projects/algo/Other/tambov/mask_output \
+  --analysis-max-distance 0.02
+```
+
+```bash
+python mask_mapper.py --ui --live-stream --load-dir mask_output /path/to/source
+```

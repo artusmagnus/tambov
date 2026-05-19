@@ -43,8 +43,8 @@ def parse_args() -> argparse.Namespace:
     if args.source and args.source_option and args.source != args.source_option:
         parser.error("Provide the input source either positionally or with --video/--source/--input/--stream, not both.")
     args.source = args.source_option or args.source
-    if not args.source:
-        parser.error("an input source is required (positional source or --video/--source/--input/--stream).")
+    if not args.source and not args.ui:
+        parser.error("an input source is required (positional source or --video/--source/--input/--stream), unless --ui is used.")
     return args
 
 
@@ -69,6 +69,26 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = parse_args()
+
+    if args.ui:
+        import settings_launcher
+        settings_launcher.launch_with_defaults({
+            "script": "mask_annotator.py",
+            "source": args.source,
+            "out_dir": str(args.out_dir),
+            "load_dir": str(args.load_dir) if args.load_dir else None,
+            "scale": args.scale,
+            "alpha": args.alpha,
+            "analysis_max_distance": args.analysis_max_distance,
+            "analysis_time_window": args.analysis_time_window,
+            "analysis_sample_interval": args.analysis_sample_interval,
+            "hex_size": args.hex_size,
+            "show_hex_values": args.show_hex_values,
+            "use_opencl": args.use_opencl,
+            "brush_size": args.brush_size,
+            "max_display_width": args.max_display_width,
+        })
+        return 0
 
     import cv2 as cv2_module
     import numpy as np_module
