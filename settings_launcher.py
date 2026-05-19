@@ -43,6 +43,7 @@ class Launcher(tk.Tk):
         self.use_opencl_var = tk.BooleanVar(value=False)
         self.use_obstruction_colors_var = tk.BooleanVar(value=False)
 
+        self.selected_command: list[str] | None = None
         self._build_ui()
         self._apply_initial(initial or {})
         self._refresh_script_mode()
@@ -162,6 +163,7 @@ class Launcher(tk.Tk):
         btns.pack(fill="x", pady=(10, 0))
         ttk.Button(btns, text="Show command", command=self.show_command).pack(side="left")
         ttk.Button(btns, text="Run", command=self.run_command).pack(side="left", padx=8)
+        ttk.Button(btns, text="OK", command=self.accept_and_close).pack(side="left")
 
         self.command_preview = tk.Text(root, height=8, wrap="word")
         self.command_preview.pack(fill="both", expand=True, pady=(8, 0))
@@ -271,14 +273,27 @@ class Launcher(tk.Tk):
             messagebox.showerror("Run failed", str(exc))
 
 
-def launch_with_defaults(initial: dict[str, object] | None = None) -> int:
+
+    def accept_and_close(self) -> None:
+        try:
+            cmd = self.build_command()
+        except Exception as exc:
+            messagebox.showerror("Invalid settings", str(exc))
+            return
+        self.selected_command = cmd
+        self.destroy()
+
+def launch_with_defaults(initial: dict[str, object] | None = None) -> list[str] | None:
     app = Launcher(initial=initial)
     app.mainloop()
-    return 0
+    return app.selected_command
 
 
 def main() -> int:
-    return launch_with_defaults()
+    cmd = launch_with_defaults()
+    if cmd is None:
+        return 0
+    return subprocess.call(cmd, cwd=Path(__file__).resolve().parent)
 
 
 if __name__ == "__main__":

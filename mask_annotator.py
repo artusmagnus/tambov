@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 import mask_mapper
@@ -73,7 +74,7 @@ def main() -> int:
 
     if args.ui:
         import settings_launcher
-        settings_launcher.launch_with_defaults({
+        selected_cmd = settings_launcher.launch_with_defaults({
             "script": "mask_annotator.py",
             "source": args.source,
             "out_dir": str(args.out_dir),
@@ -89,7 +90,9 @@ def main() -> int:
             "brush_size": args.brush_size,
             "max_display_width": args.max_display_width,
         })
-        return 0
+        if selected_cmd is None:
+            return 0
+        return subprocess.call(selected_cmd, cwd=Path(__file__).resolve().parent)
 
     import cv2 as cv2_module
     import numpy as np_module

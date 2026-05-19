@@ -1133,7 +1133,7 @@ def main() -> int:
 
     if args.ui:
         import settings_launcher
-        settings_launcher.launch_with_defaults({
+        selected_cmd = settings_launcher.launch_with_defaults({
             "script": "mask_mapper.py",
             "source": args.source,
             "out_dir": str(args.out_dir),
@@ -1158,7 +1158,9 @@ def main() -> int:
             "output_video": str(args.output_video) if args.output_video else None,
             "mode": "process" if args.process_video else "live",
         })
-        return 0
+        if selected_cmd is None:
+            return 0
+        return subprocess.call(selected_cmd, cwd=Path(__file__).resolve().parent)
 
     global cv2, np
     import cv2 as cv2_module
