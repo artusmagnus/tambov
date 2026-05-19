@@ -4,6 +4,15 @@ from collections import deque
 
 import cv2
 import numpy as np
+from mapper_accel import (
+    accelerated_temporal_average,
+    add_to_temporal_accumulator,
+    finish_temporal_average,
+    make_temporal_accumulator,
+    subtract_from_temporal_accumulator,
+)
+from mapper_capture import clamp_frame
+from mapper_defs import EditorState, FrameView
 
 def read_frame(capture: cv2.VideoCapture, index: int) -> np.ndarray:
     capture.set(cv2.CAP_PROP_POS_FRAMES, index)
