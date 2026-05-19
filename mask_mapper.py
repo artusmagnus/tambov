@@ -644,9 +644,11 @@ def obstruction_outlier_likelihood(
         weighted = closeness * (weight / max_weight)
         score += weighted
     return min(score, 1.0)
+
+
 def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -> None:
     samples = collect_hex_color_samples(state, capture)
-    obstruction_refs = collect_obstruction_color_references(state, capture)
+    obstruction_refs = collect_obstruction_color_references(state, capture) if state.use_obstruction_colors else []
     complete_models: dict[int, HexWetnessModel] = {}
     for cell_index, cell_samples in samples.items():
         if not cell_samples["dry"] or not cell_samples["wet"]:
@@ -738,8 +740,10 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         display_polygon = get_display_polygon(state, cell)
         wetness_text: str | None = None
         if state.analysis_enabled:
-            current_oklab = bgr_to_oklab(average_color)
-            obstruction_likelihood = obstruction_outlier_likelihood(state.obstruction_color_references, current_oklab)
+            obstruction_likelihood = 0.0
+            if state.use_obstruction_colors:
+                current_oklab = bgr_to_oklab(average_color)
+                obstruction_likelihood = obstruction_outlier_likelihood(state.obstruction_color_references, current_oklab)
             if cell.index not in state.wetness_models:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
@@ -1225,6 +1229,7 @@ def main() -> int:
         show_hex_values=args.show_hex_values,
         average_wetness_only=args.average_wetness_only,
         use_opencl=use_opencl,
+        use_obstruction_colors=args.use_obstruction_colors,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},

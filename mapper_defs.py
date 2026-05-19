@@ -106,6 +106,7 @@ class EditorState:
     show_hex_values: bool
     average_wetness_only: bool
     use_opencl: bool
+    use_obstruction_colors: bool
     frame_index: int = 0
     selected: str = "floor"
     brush_mode: str = "draw"

@@ -137,6 +137,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use-obstruction-colors",
+        action="store_true",
+        help=(
+            "Use obstruction annotations as weighted color references during analysis outlier filtering. "
+            "Disabled by default."
+        ),
+    )
+    parser.add_argument(
         "--analysis-source",
         help=(
             "Optional seekable video source used to build the dry-to-wet model before "
