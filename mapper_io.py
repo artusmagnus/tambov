@@ -5,6 +5,74 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from mapper_capture import clamp_frame
+from mapper_defs import CONDITION_LABELS, MASK_CLASSES, EditorState
+
+
+def make_display_mask(mask: np.ndarray, state: EditorState) -> np.ndarray:
+    if state.scale == 1.0:
+        return mask.copy()
+    return cv2.resize(mask, state.display_size, interpolation=cv2.INTER_NEAREST)
+
+
+def refresh_display_mask(state: EditorState, label: str) -> None:
+    state.display_masks[label] = make_display_mask(state.masks[label], state)
+    state.masks_dirty = True
+    state.render_dirty = True
+
+
+def invalidate_masks(state: EditorState) -> None:
+    state.mask_revision += 1
+    state.masks_dirty = True
+    state.render_dirty = True
+
+
+def make_empty_mask(state: EditorState) -> np.ndarray:
+    return np.zeros((state.height, state.width), dtype=np.uint8)
+
+
+def make_empty_condition_masks(state: EditorState) -> dict[str, np.ndarray]:
+    return {label: make_empty_mask(state) for label in CONDITION_LABELS}
+
+
+def ensure_condition_masks(state: EditorState, frame_index: int) -> dict[str, np.ndarray]:
+    if frame_index not in state.condition_masks_by_frame:
+        state.condition_masks_by_frame[frame_index] = make_empty_condition_masks(state)
+    return state.condition_masks_by_frame[frame_index]
+
+
+def bind_condition_masks_to_frame(state: EditorState, frame_index: int) -> None:
+    frame_masks = ensure_condition_masks(state, frame_index)
+    state.current_condition_frame = frame_index
+    for label in CONDITION_LABELS:
+        state.masks[label] = frame_masks[label]
+        refresh_display_mask(state, label)
+
+
+def has_condition_labels(frame_masks: dict[str, np.ndarray]) -> bool:
+    return any(np.any(frame_masks[label] > 0) for label in CONDITION_LABELS)
+
+
+def make_numbered_annotation_mask(state: EditorState, frame_masks: dict[str, np.ndarray]) -> np.ndarray:
+    numbered_mask = np.zeros((state.height, state.width), dtype=np.uint8)
+    numbered_mask[state.masks["floor"] > 0] = MASK_CLASSES["floor"]["id"]
+    for label in CONDITION_LABELS:
+        numbered_mask[frame_masks[label] > 0] = MASK_CLASSES[label]["id"]
+    return numbered_mask
+
+
+def frame_for_annotation_save(state: EditorState, capture: cv2.VideoCapture | None, frame_index: int) -> np.ndarray | None:
+    if frame_index in state.annotation_frames_by_index:
+        return state.annotation_frames_by_index[frame_index]
+    if capture is None:
+        return None
+    capture.set(cv2.CAP_PROP_POS_FRAMES, clamp_frame(frame_index, state.frame_count))
+    ok, frame = capture.read()
+    if not ok or frame is None:
+        print(f"Skipping source frame save for frame {frame_index + 1}: could not read frame from source.")
+        return None
+    state.annotation_frames_by_index[frame_index] = frame
+    return frame
 
 def save_outputs(state: EditorState, capture: cv2.VideoCapture | None = None) -> None:
     state.out_dir.mkdir(parents=True, exist_ok=True)
