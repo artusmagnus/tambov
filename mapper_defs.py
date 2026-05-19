@@ -116,6 +116,7 @@ class EditorState:
     analysis_enabled: bool = False
     analysis_revision: int = 0
     wetness_models: dict[int, HexWetnessModel] = field(default_factory=dict)
+    obstruction_color_references: list[tuple[np.ndarray, int]] = field(default_factory=list)
     hex_cells_cache_key: tuple[int, int, int] | None = None
     hex_cells: list[HexCell] = field(default_factory=list)
     floor_hex_cells_cache_key: tuple[int, int, int, int, int] | None = None

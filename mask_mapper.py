@@ -596,8 +596,57 @@ def infer_single_state_wetness_models(
     return inferred_models
 
 
+
+
+def collect_obstruction_color_references(
+    state: EditorState,
+    capture: cv2.VideoCapture | None,
+) -> list[tuple[np.ndarray, int]]:
+    hex_cells = get_hex_cells(state)
+    quantized_samples: dict[tuple[int, int, int], list[np.ndarray]] = {}
+    sample_weights: dict[tuple[int, int, int], int] = {}
+    quantization_step = 0.02
+
+    for frame_index, frame_masks in sorted(state.condition_masks_by_frame.items()):
+        obstruction_mask = frame_masks["obstruction"]
+        if not np.any(obstruction_mask > 0):
+            continue
+        frame = annotation_frame_for_analysis(state, capture, frame_index)
+        for cell in hex_cells:
+            if not cell_overlaps_mask(obstruction_mask, cell):
+                continue
+            average_color = average_bgr_in_cell(frame, cell)
+            if average_color is None:
+                continue
+            oklab = bgr_to_oklab(average_color)
+            bin_key = tuple(np.round(oklab / quantization_step).astype(int).tolist())
+            quantized_samples.setdefault(bin_key, []).append(oklab)
+            sample_weights[bin_key] = sample_weights.get(bin_key, 0) + 1
+
+    references: list[tuple[np.ndarray, int]] = []
+    for bin_key, samples in quantized_samples.items():
+        references.append((np.mean(samples, axis=0), sample_weights[bin_key]))
+    references.sort(key=lambda item: item[1], reverse=True)
+    return references
+
+
+def obstruction_outlier_likelihood(
+    obstruction_refs: list[tuple[np.ndarray, int]],
+    current_oklab: np.ndarray,
+) -> float:
+    if not obstruction_refs:
+        return 0.0
+    max_weight = max(weight for _, weight in obstruction_refs)
+    score = 0.0
+    for reference_oklab, weight in obstruction_refs:
+        distance = float(np.linalg.norm(current_oklab - reference_oklab))
+        closeness = float(np.exp(-((distance / 0.06) ** 2)))
+        weighted = closeness * (weight / max_weight)
+        score += weighted
+    return min(score, 1.0)
 def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -> None:
     samples = collect_hex_color_samples(state, capture)
+    obstruction_refs = collect_obstruction_color_references(state, capture)
     complete_models: dict[int, HexWetnessModel] = {}
     for cell_index, cell_samples in samples.items():
         if not cell_samples["dry"] or not cell_samples["wet"]:
@@ -612,6 +661,7 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -
     models = {**complete_models, **inferred_models}
 
     state.wetness_models = models
+    state.obstruction_color_references = obstruction_refs
     state.analysis_enabled = bool(models)
     state.hex_enabled = True
     state.analysis_revision += 1
@@ -619,7 +669,8 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -
     if models:
         print(
             f"Wetness analysis ready for {len(models)} hex cell(s) "
-            f"({len(complete_models)} directly paired, {len(inferred_models)} inferred from one-state samples). "
+            f"({len(complete_models)} directly paired, {len(inferred_models)} inferred from one-state samples, "
+            f"{len(obstruction_refs)} obstruction colour references). "
             "Navigate frames to view floor wetness estimates."
         )
     else:
@@ -687,6 +738,8 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         display_polygon = get_display_polygon(state, cell)
         wetness_text: str | None = None
         if state.analysis_enabled:
+            current_oklab = bgr_to_oklab(average_color)
+            obstruction_likelihood = obstruction_outlier_likelihood(state.obstruction_color_references, current_oklab)
             if cell.index not in state.wetness_models:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
@@ -694,7 +747,8 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
                 cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
                 continue
             wetness_value, distance = project_onto_wetness_axis(state.wetness_models[cell.index], average_color)
-            if distance > state.analysis_max_distance:
+            obstruction_gate_distance = state.analysis_max_distance * max(0.4, 1.0 - (0.55 * obstruction_likelihood))
+            if distance > state.analysis_max_distance or distance > obstruction_gate_distance:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
                 cv2.fillPoly(hex_mask, [display_polygon], 255)
