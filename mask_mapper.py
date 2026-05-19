@@ -57,7 +57,8 @@ from mapper_io import (
 def live_frame_stride(state: EditorState) -> int:
     if state.live_target_fps is None:
         return 1
-    return max(1, int(round(state.fps / state.live_target_fps)))
+    source_fps = min(max(state.fps if state.fps > 0 else 30.0, 1.0), 120.0)
+    return max(1, int(round(source_fps / state.live_target_fps)))
 
 
 

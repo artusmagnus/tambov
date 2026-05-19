@@ -6,10 +6,17 @@ import cv2
 import numpy as np
 
 
+def normalized_live_source_fps(state) -> float:
+    """Return a sane FPS estimate for live playback timing."""
+    fps = state.fps if state.fps > 0 else 30.0
+    # Some live sources report invalid FPS (e.g. 1000+), which makes playback appear fast-forwarded.
+    return min(max(fps, 1.0), 120.0)
+
+
 def live_analysis_interval_frames(state) -> int:
     if state.live_analysis_interval <= 0:
         return 1
-    source_fps = state.fps if state.fps > 0 else 30.0
+    source_fps = normalized_live_source_fps(state)
     effective_fps = min(source_fps, state.live_target_fps) if state.live_target_fps is not None else source_fps
     return max(1, int(round(state.live_analysis_interval * effective_fps)))
 
@@ -43,7 +50,7 @@ def play_live_stream_with_analysis_overlay(
         capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
     stream_window_name = "wet/dry floor live analysis"
     cv2.namedWindow(stream_window_name, cv2.WINDOW_NORMAL)
-    fps = state.fps if state.fps > 0 else 30.0
+    fps = normalized_live_source_fps(state)
     display_fps = min(fps, state.live_target_fps) if state.live_target_fps is not None else fps
     frame_delay_ms = max(1, int(round(1000.0 / display_fps)))
     frame_period_seconds = 1.0 / display_fps
