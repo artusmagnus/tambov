@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-hex-values", action="store_true", help="Draw numeric wetness values inside analysis hexes.")
     parser.add_argument("--use-opencl", action="store_true", help="Use OpenCV OpenCL acceleration when available.")
     parser.add_argument("--brush-size", type=int, default=20, help="Initial brush radius in source pixels.")
+    parser.add_argument("--ui", action="store_true", help="Open settings UI prefilled from provided CLI args.")
     parser.add_argument(
         "--max-display-width",
         type=int,
