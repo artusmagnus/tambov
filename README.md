@@ -236,3 +236,8 @@ Saving writes these images to `--out-dir`:
 - `<video>_frame_<frame>_dry_mask.png` — frame-specific binary dry-floor mask kept for backward compatibility and inspection.
 - `<video>_frame_<frame>_wet_mask.png` — frame-specific binary wet-floor mask kept for backward compatibility and inspection.
 - `<video>_frame_<frame>_obstruction_mask.png` — frame-specific binary obstruction mask kept for backward compatibility and inspection.
+
+
+## Settings UI launcher
+
+Run `python settings_launcher.py` to open a small desktop UI where you can select `mask_annotator.py` or `mask_mapper.py`, configure flags/values, preview the command, and launch it.

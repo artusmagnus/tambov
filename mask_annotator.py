@@ -113,6 +113,7 @@ def main() -> int:
             show_hex_values=args.show_hex_values,
             average_wetness_only=False,
             use_opencl=use_opencl,
+            use_obstruction_colors=False,
             brush_size=args.brush_size,
             hex_cell_size=args.hex_size,
             masks={label: mask_mapper.np.zeros((height, width), dtype=mask_mapper.np.uint8) for label in mask_mapper.MASK_CLASSES},
