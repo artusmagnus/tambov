@@ -58,10 +58,12 @@ def play_live_stream_with_analysis_overlay(
     stream_start_time = time.monotonic()
 
     while True:
-        target_elapsed = processed_frames * frame_period_seconds
-        now_elapsed = time.monotonic() - stream_start_time
-        behind_seconds = now_elapsed - target_elapsed
-        catch_up_frames = max(0, int(behind_seconds / frame_period_seconds))
+        catch_up_frames = 0
+        if state.is_live_source:
+            target_elapsed = processed_frames * frame_period_seconds
+            now_elapsed = time.monotonic() - stream_start_time
+            behind_seconds = now_elapsed - target_elapsed
+            catch_up_frames = max(0, int(behind_seconds / frame_period_seconds))
 
         read_failed = False
         drop_frames = max(0, process_every_n - 1 + catch_up_frames)
@@ -108,8 +110,11 @@ def play_live_stream_with_analysis_overlay(
         )
         cv2.imshow(stream_window_name, output_frame)
 
-        remaining_delay_seconds = ((processed_frames + 1) * frame_period_seconds) - (time.monotonic() - stream_start_time)
-        dynamic_wait_ms = min(frame_delay_ms, max(1, int(round(remaining_delay_seconds * 1000.0))))
+        if state.is_live_source:
+            remaining_delay_seconds = ((processed_frames + 1) * frame_period_seconds) - (time.monotonic() - stream_start_time)
+            dynamic_wait_ms = min(frame_delay_ms, max(1, int(round(remaining_delay_seconds * 1000.0))))
+        else:
+            dynamic_wait_ms = frame_delay_ms
         key = cv2.waitKey(dynamic_wait_ms) & 0xFF
         if key in (ord("q"), 27):
             break
