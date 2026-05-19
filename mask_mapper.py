@@ -1794,6 +1794,7 @@ def play_live_stream_with_analysis_overlay(
     fps = state.fps if state.fps > 0 else 30.0
     display_fps = min(fps, state.live_target_fps) if state.live_target_fps is not None else fps
     frame_delay_ms = max(1, int(round(1000.0 / display_fps)))
+    frame_period_seconds = 1.0 / display_fps
     analysis_interval_frames = live_analysis_interval_frames(state)
     process_every_n = live_frame_stride(state)
     live_averager = LiveFrameAverager(state)
@@ -1802,10 +1803,17 @@ def play_live_stream_with_analysis_overlay(
     cached_hex_mask: np.ndarray | None = None
     cached_average_wetness: float | None = None
     processed_frames = 0
+    stream_start_time = time.monotonic()
 
     while True:
+        target_elapsed = processed_frames * frame_period_seconds
+        now_elapsed = time.monotonic() - stream_start_time
+        behind_seconds = now_elapsed - target_elapsed
+        catch_up_frames = max(0, int(behind_seconds / frame_period_seconds))
+
         read_failed = False
-        for _ in range(process_every_n - 1):
+        drop_frames = max(0, process_every_n - 1 + catch_up_frames)
+        for _ in range(drop_frames):
             if not capture.grab():
                 read_failed = True
                 break
@@ -1826,6 +1834,7 @@ def play_live_stream_with_analysis_overlay(
             cached_hex_overlay = None
             cached_hex_mask = None
             cached_average_wetness = None
+            stream_start_time = time.monotonic() - (processed_frames * frame_period_seconds)
             continue
 
         state.frame_index = processed_frames
@@ -1846,7 +1855,10 @@ def play_live_stream_with_analysis_overlay(
             state, frame, cached_hex_overlay, cached_hex_mask, cached_average_wetness
         )
         cv2.imshow(stream_window_name, output_frame)
-        key = cv2.waitKey(frame_delay_ms) & 0xFF
+
+        remaining_delay_seconds = ((processed_frames + 1) * frame_period_seconds) - (time.monotonic() - stream_start_time)
+        dynamic_wait_ms = min(frame_delay_ms, max(1, int(round(remaining_delay_seconds * 1000.0))))
+        key = cv2.waitKey(dynamic_wait_ms) & 0xFF
         if key in (ord("q"), 27):
             break
 
