@@ -14,7 +14,8 @@ class Launcher(tk.Tk):
     def __init__(self, initial: dict[str, object] | None = None) -> None:
         super().__init__()
         self.title("Wet/Dry Mapper Launcher")
-        self.geometry("760x740")
+        self.geometry("980x980")
+        self.minsize(900, 860)
 
         self.script_var = tk.StringVar(value="mask_mapper.py")
         self.source_var = tk.StringVar()
@@ -165,6 +166,7 @@ class Launcher(tk.Tk):
         ttk.Button(btns, text="Run", command=self.run_command).pack(side="left", padx=8)
         ttk.Button(btns, text="OK", command=self.accept_and_close).pack(side="left")
 
+        ttk.Label(root, text="All script flags are available below; script-specific fields are ignored when not applicable.").pack(anchor="w", pady=(4, 0))
         self.command_preview = tk.Text(root, height=8, wrap="word")
         self.command_preview.pack(fill="both", expand=True, pady=(8, 0))
 
@@ -200,11 +202,19 @@ class Launcher(tk.Tk):
         ttk.Label(row, text=label, width=28).pack(side="left")
         ttk.Entry(row, textvariable=var, width=16).pack(side="left")
 
+
+    def _set_children_state(self, widget: tk.Widget, state: str) -> None:
+        for child in widget.winfo_children():
+            try:
+                child.configure(state=state)
+            except tk.TclError:
+                pass
+            self._set_children_state(child, state)
+
     def _refresh_script_mode(self) -> None:
         is_mapper = self.script_var.get() == "mask_mapper.py"
         state = "normal" if is_mapper else "disabled"
-        for child in self.mode_frame.winfo_children():
-            child.configure(state=state)
+        self._set_children_state(self.mode_frame, state)
 
     def build_command(self) -> list[str]:
         script = self.script_var.get()
