@@ -21,7 +21,6 @@ class Launcher(tk.Tk):
         self.source_var = tk.StringVar()
         self.out_dir_var = tk.StringVar(value="mask_output")
         self.load_dir_var = tk.StringVar()
-        self.analysis_source_var = tk.StringVar()
         self.output_video_var = tk.StringVar()
 
         self.mode_var = tk.StringVar(value="live")
@@ -62,8 +61,6 @@ class Launcher(tk.Tk):
                 self.out_dir_var.set(str(value))
             elif key == "load_dir":
                 self.load_dir_var.set(str(value))
-            elif key == "analysis_source":
-                self.analysis_source_var.set(str(value))
             elif key == "output_video":
                 self.output_video_var.set(str(value))
             elif key == "mode":
@@ -117,7 +114,6 @@ class Launcher(tk.Tk):
         self._path_row(paths, "Source", self.source_var, is_file=True)
         self._path_row(paths, "Out dir", self.out_dir_var, is_dir=True)
         self._path_row(paths, "Load dir", self.load_dir_var, is_dir=True)
-        self._path_row(paths, "Analysis source", self.analysis_source_var, is_file=True)
         self._path_row(paths, "Output video", self.output_video_var, is_save_file=True)
 
         self.mode_frame = ttk.LabelFrame(root, text="mask_mapper mode", padding=8)
@@ -251,8 +247,6 @@ class Launcher(tk.Tk):
                 cmd.append("--average-wetness-only")
             if self.use_obstruction_colors_var.get():
                 cmd.append("--use-obstruction-colors")
-            if self.analysis_source_var.get().strip():
-                cmd += ["--analysis-source", self.analysis_source_var.get().strip()]
             if self.output_video_var.get().strip():
                 cmd += ["--output-video", self.output_video_var.get().strip()]
             if self.fps_var.get().strip():

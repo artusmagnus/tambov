@@ -145,14 +145,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--analysis-source",
-        help=(
-            "Optional seekable video source used to build the dry-to-wet model before "
-            "--live-stream reads from the live source. Needed for RTSP live streams only "
-            "when --load-dir does not contain saved annotation frame images."
-        ),
-    )
-    parser.add_argument(
         "--output-video",
         type=Path,
         help="Output video path for --process-video. Defaults to <out-dir>/<video>_hex_overlay.mp4.",

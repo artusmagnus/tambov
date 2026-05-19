@@ -1154,7 +1154,6 @@ def main() -> int:
             "fps": args.fps if args.fps is not None else "",
             "stream_reconnect_delay": args.stream_reconnect_delay,
             "rtsp_transport": args.rtsp_transport,
-            "analysis_source": args.analysis_source,
             "output_video": str(args.output_video) if args.output_video else None,
             "mode": "process" if args.process_video else "live",
         })
@@ -1182,20 +1181,6 @@ def main() -> int:
         raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
     if args.live_stream and not args.load_dir:
         raise ValueError("--live-stream requires --load-dir so masks can be reconstructed.")
-    if (
-        args.live_stream
-        and is_rtsp_source(args.source)
-        and not args.analysis_source
-        and not load_dir_has_saved_annotation_frames(args.load_dir)
-    ):
-        raise ValueError(
-            "--live-stream with an RTSP source requires either saved annotation frame images "
-            "(<video>_frame_<frame>_image.png) in --load-dir or --analysis-source pointing "
-            "to the seekable calibration video used to create the masks. The saved binary "
-            "masks alone do not contain source frame colours, so the tool needs one of "
-            "those image sources to rebuild the dry-to-wet colour model before applying "
-            "it to the live stream."
-        )
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.analysis_time_window < 0:
@@ -1219,7 +1204,7 @@ def main() -> int:
     use_opencl = configure_opencl(args.use_opencl)
 
     source = args.source
-    mask_stem_source = args.analysis_source if args.live_stream and args.analysis_source else source
+    mask_stem_source = source
     source_stem = source_name_stem(mask_stem_source)
     capture = open_capture(source, args.rtsp_transport)
 
@@ -1280,7 +1265,7 @@ def main() -> int:
             capture.release()
 
     if args.live_stream:
-        analysis_capture = open_capture(args.analysis_source, args.rtsp_transport) if args.analysis_source else None
+        analysis_capture = None
         try:
             return play_live_stream_with_analysis_overlay(
                 state,
