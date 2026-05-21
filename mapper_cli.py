@@ -137,11 +137,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--analysis-source",
+        "--use-obstruction-colors",
+        action="store_true",
         help=(
-            "Optional seekable video source used to build the dry-to-wet model before "
-            "--live-stream reads from the live source. Needed for RTSP live streams only "
-            "when --load-dir does not contain saved annotation frame images."
+            "Use obstruction annotations as weighted color references during analysis outlier filtering. "
+            "Disabled by default."
         ),
     )
     parser.add_argument(
@@ -155,6 +155,7 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Initial brush radius in original video pixels.",
     )
+    parser.add_argument("--ui", action="store_true", help="Open settings UI prefilled from provided CLI args.")
     parser.add_argument(
         "--max-display-width",
         type=int,
@@ -168,6 +169,6 @@ def parse_args() -> argparse.Namespace:
     if args.source and args.source_option and args.source != args.source_option:
         parser.error("Provide the input source either positionally or with --video/--source/--input/--stream, not both.")
     args.source = args.source_option or args.source
-    if not args.source:
-        parser.error("an input source is required (positional source or --video/--source/--input/--stream).")
+    if not args.source and not args.ui:
+        parser.error("an input source is required (positional source or --video/--source/--input/--stream), unless --ui is used.")
     return args

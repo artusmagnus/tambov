@@ -57,7 +57,8 @@ from mapper_io import (
 def live_frame_stride(state: EditorState) -> int:
     if state.live_target_fps is None:
         return 1
-    return max(1, int(round(state.fps / state.live_target_fps)))
+    source_fps = min(max(state.fps if state.fps > 0 else 30.0, 1.0), 120.0)
+    return max(1, int(round(source_fps / state.live_target_fps)))
 
 
 
@@ -595,8 +596,59 @@ def infer_single_state_wetness_models(
     return inferred_models
 
 
+
+
+def collect_obstruction_color_references(
+    state: EditorState,
+    capture: cv2.VideoCapture | None,
+) -> list[tuple[np.ndarray, int]]:
+    hex_cells = get_hex_cells(state)
+    quantized_samples: dict[tuple[int, int, int], list[np.ndarray]] = {}
+    sample_weights: dict[tuple[int, int, int], int] = {}
+    quantization_step = 0.02
+
+    for frame_index, frame_masks in sorted(state.condition_masks_by_frame.items()):
+        obstruction_mask = frame_masks["obstruction"]
+        if not np.any(obstruction_mask > 0):
+            continue
+        frame = annotation_frame_for_analysis(state, capture, frame_index)
+        for cell in hex_cells:
+            if not cell_overlaps_mask(obstruction_mask, cell):
+                continue
+            average_color = average_bgr_in_cell(frame, cell)
+            if average_color is None:
+                continue
+            oklab = bgr_to_oklab(average_color)
+            bin_key = tuple(np.round(oklab / quantization_step).astype(int).tolist())
+            quantized_samples.setdefault(bin_key, []).append(oklab)
+            sample_weights[bin_key] = sample_weights.get(bin_key, 0) + 1
+
+    references: list[tuple[np.ndarray, int]] = []
+    for bin_key, samples in quantized_samples.items():
+        references.append((np.mean(samples, axis=0), sample_weights[bin_key]))
+    references.sort(key=lambda item: item[1], reverse=True)
+    return references
+
+
+def obstruction_outlier_likelihood(
+    obstruction_refs: list[tuple[np.ndarray, int]],
+    current_oklab: np.ndarray,
+) -> float:
+    if not obstruction_refs:
+        return 0.0
+    max_weight = max(weight for _, weight in obstruction_refs)
+    score = 0.0
+    for reference_oklab, weight in obstruction_refs:
+        distance = float(np.linalg.norm(current_oklab - reference_oklab))
+        closeness = float(np.exp(-((distance / 0.06) ** 2)))
+        weighted = closeness * (weight / max_weight)
+        score += weighted
+    return min(score, 1.0)
+
+
 def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -> None:
     samples = collect_hex_color_samples(state, capture)
+    obstruction_refs = collect_obstruction_color_references(state, capture) if state.use_obstruction_colors else []
     complete_models: dict[int, HexWetnessModel] = {}
     for cell_index, cell_samples in samples.items():
         if not cell_samples["dry"] or not cell_samples["wet"]:
@@ -611,6 +663,7 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -
     models = {**complete_models, **inferred_models}
 
     state.wetness_models = models
+    state.obstruction_color_references = obstruction_refs
     state.analysis_enabled = bool(models)
     state.hex_enabled = True
     state.analysis_revision += 1
@@ -618,7 +671,8 @@ def run_wetness_analysis(state: EditorState, capture: cv2.VideoCapture | None) -
     if models:
         print(
             f"Wetness analysis ready for {len(models)} hex cell(s) "
-            f"({len(complete_models)} directly paired, {len(inferred_models)} inferred from one-state samples). "
+            f"({len(complete_models)} directly paired, {len(inferred_models)} inferred from one-state samples, "
+            f"{len(obstruction_refs)} obstruction colour references). "
             "Navigate frames to view floor wetness estimates."
         )
     else:
@@ -686,6 +740,10 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
         display_polygon = get_display_polygon(state, cell)
         wetness_text: str | None = None
         if state.analysis_enabled:
+            obstruction_likelihood = 0.0
+            if state.use_obstruction_colors:
+                current_oklab = bgr_to_oklab(average_color)
+                obstruction_likelihood = obstruction_outlier_likelihood(state.obstruction_color_references, current_oklab)
             if cell.index not in state.wetness_models:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
@@ -693,7 +751,8 @@ def make_hex_overlay(state: EditorState, view: FrameView) -> np.ndarray:
                 cv2.polylines(hex_overlay, [display_polygon], True, (30, 30, 30), 1, cv2.LINE_AA)
                 continue
             wetness_value, distance = project_onto_wetness_axis(state.wetness_models[cell.index], average_color)
-            if distance > state.analysis_max_distance:
+            obstruction_gate_distance = state.analysis_max_distance * max(0.4, 1.0 - (0.55 * obstruction_likelihood))
+            if distance > state.analysis_max_distance or distance > obstruction_gate_distance:
                 square_size = max(4, int(round(state.hex_cell_size * state.scale / 4)))
                 fill_missing_hex_texture(hex_overlay, display_polygon, square_size)
                 cv2.fillPoly(hex_mask, [display_polygon], 255)
@@ -1072,6 +1131,36 @@ def run_annotation_editor(state: EditorState, capture: cv2.VideoCapture) -> int:
 def main() -> int:
     args = parse_args()
 
+    if args.ui:
+        import settings_launcher
+        selected_cmd = settings_launcher.launch_with_defaults({
+            "script": "mask_mapper.py",
+            "source": args.source,
+            "out_dir": str(args.out_dir),
+            "load_dir": str(args.load_dir) if args.load_dir else None,
+            "scale": args.scale,
+            "alpha": args.alpha,
+            "analysis_max_distance": args.analysis_max_distance,
+            "analysis_time_window": args.analysis_time_window,
+            "analysis_sample_interval": args.analysis_sample_interval,
+            "hex_size": args.hex_size,
+            "show_hex_values": args.show_hex_values,
+            "average_wetness_only": args.average_wetness_only,
+            "use_opencl": args.use_opencl,
+            "use_obstruction_colors": args.use_obstruction_colors,
+            "brush_size": args.brush_size,
+            "max_display_width": args.max_display_width,
+            "live_analysis_interval": args.live_analysis_interval,
+            "fps": args.fps if args.fps is not None else "",
+            "stream_reconnect_delay": args.stream_reconnect_delay,
+            "rtsp_transport": args.rtsp_transport,
+            "output_video": str(args.output_video) if args.output_video else None,
+            "mode": "process" if args.process_video else "live",
+        })
+        if selected_cmd is None:
+            return 0
+        return subprocess.call(selected_cmd, cwd=Path(__file__).resolve().parent)
+
     global cv2, np
     import cv2 as cv2_module
     import numpy as np_module
@@ -1092,20 +1181,6 @@ def main() -> int:
         raise ValueError("--process-video requires --load-dir so masks can be reconstructed.")
     if args.live_stream and not args.load_dir:
         raise ValueError("--live-stream requires --load-dir so masks can be reconstructed.")
-    if (
-        args.live_stream
-        and is_rtsp_source(args.source)
-        and not args.analysis_source
-        and not load_dir_has_saved_annotation_frames(args.load_dir)
-    ):
-        raise ValueError(
-            "--live-stream with an RTSP source requires either saved annotation frame images "
-            "(<video>_frame_<frame>_image.png) in --load-dir or --analysis-source pointing "
-            "to the seekable calibration video used to create the masks. The saved binary "
-            "masks alone do not contain source frame colours, so the tool needs one of "
-            "those image sources to rebuild the dry-to-wet colour model before applying "
-            "it to the live stream."
-        )
     if args.analysis_max_distance < 0:
         raise ValueError("--analysis-max-distance must be 0 or greater.")
     if args.analysis_time_window < 0:
@@ -1129,7 +1204,7 @@ def main() -> int:
     use_opencl = configure_opencl(args.use_opencl)
 
     source = args.source
-    mask_stem_source = args.analysis_source if args.live_stream and args.analysis_source else source
+    mask_stem_source = source
     source_stem = source_name_stem(mask_stem_source)
     capture = open_capture(source, args.rtsp_transport)
 
@@ -1170,6 +1245,7 @@ def main() -> int:
         show_hex_values=args.show_hex_values,
         average_wetness_only=args.average_wetness_only,
         use_opencl=use_opencl,
+        use_obstruction_colors=args.use_obstruction_colors,
         brush_size=args.brush_size,
         hex_cell_size=args.hex_size,
         masks={label: np.zeros((height, width), dtype=np.uint8) for label in MASK_CLASSES},
@@ -1189,7 +1265,7 @@ def main() -> int:
             capture.release()
 
     if args.live_stream:
-        analysis_capture = open_capture(args.analysis_source, args.rtsp_transport) if args.analysis_source else None
+        analysis_capture = None
         try:
             return play_live_stream_with_analysis_overlay(
                 state,

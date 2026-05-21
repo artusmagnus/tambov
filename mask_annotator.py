@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 import mask_mapper
@@ -33,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-hex-values", action="store_true", help="Draw numeric wetness values inside analysis hexes.")
     parser.add_argument("--use-opencl", action="store_true", help="Use OpenCV OpenCL acceleration when available.")
     parser.add_argument("--brush-size", type=int, default=20, help="Initial brush radius in source pixels.")
+    parser.add_argument("--ui", action="store_true", help="Open settings UI prefilled from provided CLI args.")
     parser.add_argument(
         "--max-display-width",
         type=int,
@@ -43,8 +45,8 @@ def parse_args() -> argparse.Namespace:
     if args.source and args.source_option and args.source != args.source_option:
         parser.error("Provide the input source either positionally or with --video/--source/--input/--stream, not both.")
     args.source = args.source_option or args.source
-    if not args.source:
-        parser.error("an input source is required (positional source or --video/--source/--input/--stream).")
+    if not args.source and not args.ui:
+        parser.error("an input source is required (positional source or --video/--source/--input/--stream), unless --ui is used.")
     return args
 
 
@@ -69,6 +71,28 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = parse_args()
+
+    if args.ui:
+        import settings_launcher
+        selected_cmd = settings_launcher.launch_with_defaults({
+            "script": "mask_annotator.py",
+            "source": args.source,
+            "out_dir": str(args.out_dir),
+            "load_dir": str(args.load_dir) if args.load_dir else None,
+            "scale": args.scale,
+            "alpha": args.alpha,
+            "analysis_max_distance": args.analysis_max_distance,
+            "analysis_time_window": args.analysis_time_window,
+            "analysis_sample_interval": args.analysis_sample_interval,
+            "hex_size": args.hex_size,
+            "show_hex_values": args.show_hex_values,
+            "use_opencl": args.use_opencl,
+            "brush_size": args.brush_size,
+            "max_display_width": args.max_display_width,
+        })
+        if selected_cmd is None:
+            return 0
+        return subprocess.call(selected_cmd, cwd=Path(__file__).resolve().parent)
 
     import cv2 as cv2_module
     import numpy as np_module
@@ -113,6 +137,7 @@ def main() -> int:
             show_hex_values=args.show_hex_values,
             average_wetness_only=False,
             use_opencl=use_opencl,
+            use_obstruction_colors=False,
             brush_size=args.brush_size,
             hex_cell_size=args.hex_size,
             masks={label: mask_mapper.np.zeros((height, width), dtype=mask_mapper.np.uint8) for label in mask_mapper.MASK_CLASSES},
